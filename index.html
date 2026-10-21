@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Колесо фортуны — Команда F5</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: radial-gradient(1200px 800px at 50% -10%, #1d2b4a 0%, #0e1424 55%, #090d18 100%);
+    color: #eef2fb;
+    font-family: "Segoe UI", "PT Sans", system-ui, sans-serif;
+  }
+  .hidden { display: none !important; }
+
+  /* ---------- login ---------- */
+  #login-view {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  .login-card {
+    width: min(400px, 100%);
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 20px;
+    padding: 34px 30px;
+    backdrop-filter: blur(8px);
+  }
+  .login-card h1 { font-size: 26px; margin-bottom: 6px; }
+  .login-card p { color: #9aa7c4; font-size: 14px; margin-bottom: 22px; }
+  label { display: block; font-size: 13px; color: #9aa7c4; margin: 14px 0 6px; }
+  input[type="email"], input[type="password"], input[type="text"], input[type="number"] {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(0,0,0,0.25);
+    color: #eef2fb;
+    font-size: 15px;
+    outline: none;
+  }
+  input:focus { border-color: #4f7cff; }
+  button {
+    cursor: pointer;
+    border: 0;
+    border-radius: 12px;
+    font-weight: 700;
+    transition: transform .08s ease, opacity .2s;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .btn-primary {
+    width: 100%;
+    margin-top: 22px;
+    padding: 14px;
+    font-size: 16px;
+    color: #fff;
+    background: linear-gradient(135deg, #4f7cff, #7a4fff);
+  }
+  .btn-primary:not(:disabled):hover { transform: translateY(-1px); }
+  .error { color: #ff7b8a; font-size: 13px; margin-top: 12px; min-height: 18px; }
+
+  /* ---------- app ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 22px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    flex-wrap: wrap;
+  }
+  header .logo { font-weight: 800; font-size: 18px; letter-spacing: .02em; }
+  header .who { color: #9aa7c4; font-size: 14px; }
+  .badge {
+    background: linear-gradient(135deg, #ffb02e, #ff7a3d);
+    color: #241300;
+    font-weight: 800;
+    padding: 7px 14px;
+    border-radius: 99px;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  .tabs { margin-left: auto; display: flex; gap: 8px; }
+  .tabs button {
+    background: rgba(255,255,255,0.07);
+    color: #cdd7ee;
+    padding: 9px 16px;
+    font-size: 14px;
+  }
+  .tabs button.active { background: #4f7cff; color: #fff; }
+  #logout {
+    background: transparent;
+    color: #9aa7c4;
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 9px 14px;
+    font-size: 13px;
+  }
+
+  main { padding: 26px 22px 60px; max-width: 1060px; margin: 0 auto; }
+
+  /* ---------- wheel ---------- */
+  #wheel-view { text-align: center; }
+  .wheel-wrap {
+    position: relative;
+    width: min(440px, 92vw);
+    margin: 10px auto 0;
+  }
+  #wheel { width: 100%; height: auto; display: block; }
+  .pointer {
+    position: absolute;
+    top: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 16px solid transparent;
+    border-right: 16px solid transparent;
+    border-top: 30px solid #ffd94f;
+    filter: drop-shadow(0 3px 4px rgba(0,0,0,.5));
+    z-index: 2;
+  }
+  .hub {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%,-50%);
+    width: 74px; height: 74px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #5d6c95, #1b2338 70%);
+    border: 3px solid rgba(255,255,255,0.25);
+    z-index: 1;
+  }
+  #spin-btn {
+    margin-top: 26px;
+    padding: 16px 54px;
+    font-size: 20px;
+    color: #fff;
+    background: linear-gradient(135deg, #22c55e, #0ea5e9);
+    box-shadow: 0 10px 30px rgba(14,165,233,.3);
+  }
+  #spin-btn:not(:disabled):hover { transform: translateY(-2px) scale(1.02); }
+  #result {
+    margin: 20px auto 0;
+    max-width: 440px;
+    min-height: 30px;
+    font-size: 22px;
+    font-weight: 800;
+  }
+  #result.win { color: #ffd94f; animation: pop .5s ease; }
+  @keyframes pop { 0% { transform: scale(.6); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+
+  .panel {
+    margin-top: 34px;
+    text-align: left;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 16px;
+    padding: 18px 20px;
+  }
+  .panel h2 { font-size: 17px; margin-bottom: 12px; color: #cdd7ee; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.07); }
+  th { color: #8fa0c4; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: 0; }
+
+  /* ---------- admin ---------- */
+  .prize-row {
+    display: grid;
+    grid-template-columns: 1fr 110px 64px 44px;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .prize-row input[type="color"] {
+    width: 100%; height: 42px;
+    padding: 2px;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 10px;
+    background: rgba(0,0,0,0.25);
+  }
+  .btn-small {
+    padding: 10px 16px;
+    font-size: 14px;
+    color: #fff;
+    background: rgba(255,255,255,0.1);
+  }
+  .btn-del { background: rgba(231,76,60,.25); color: #ff9d97; height: 42px; }
+  .btn-save { background: linear-gradient(135deg, #4f7cff, #7a4fff); color: #fff; padding: 12px 26px; font-size: 15px; margin-top: 14px; }
+  .admin-grid { display: grid; gap: 22px; }
+  .sum-hint { color: #9aa7c4; font-size: 13px; margin-top: 10px; }
+  .row-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #toast {
+    position: fixed;
+    bottom: 26px; left: 50%;
+    transform: translateX(-50%);
+    background: #1c2740;
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 12px 22px;
+    border-radius: 12px;
+    font-size: 14px;
+    opacity: 0;
+    transition: opacity .3s;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="login-view">
+  <div class="login-card">
+    <h1>Колесо фортуны</h1>
+    <p>Войдите почтой из amoCRM. Пароль — та же почта.</p>
+    <label for="email">Почта</label>
+    <input id="email" type="email" placeholder="manager@company.ru" autocomplete="username">
+    <label for="password">Пароль</label>
+    <input id="password" type="password" placeholder="manager@company.ru" autocomplete="current-password">
+    <button class="btn-primary" id="login-btn">Войти</button>
+    <div class="error" id="login-error"></div>
+  </div>
+</div>
+
+<div id="app-view" class="hidden">
+  <header>
+    <div class="logo">F5 · Колесо фортуны</div>
+    <div class="who" id="who"></div>
+    <div class="badge" id="coins-badge">0 коинов</div>
+    <div class="tabs">
+      <button id="tab-wheel" class="active">Колесо</button>
+      <button id="tab-admin" class="hidden">Админ</button>
+      <button id="logout">Выйти</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="wheel-view">
+      <div class="wheel-wrap">
+        <div class="pointer"></div>
+        <canvas id="wheel" width="880" height="880"></canvas>
+        <div class="hub"></div>
+      </div>
+      <button id="spin-btn">Крутить!</button>
+      <div id="result"></div>
+
+      <div class="panel">
+        <h2>Мои последние прокруты</h2>
+        <table id="my-history"><tbody></tbody></table>
+      </div>
+    </section>
+
+    <section id="admin-view" class="hidden">
+      <div class="admin-grid">
+        <div class="panel">
+          <h2>Призы и шансы выпадения</h2>
+          <div id="prize-rows"></div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn-small" id="add-prize">+ Добавить приз</button>
+            <button class="btn-save" id="save-prizes">Сохранить</button>
+          </div>
+          <div class="sum-hint" id="sum-hint"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Менеджеры</h2>
+          <div class="row-actions" style="margin-bottom:10px">
+            <button class="btn-small" id="sync-btn">Синхронизировать с amoCRM</button>
+            <span class="sum-hint" id="amo-status"></span>
+          </div>
+          <table id="users-table">
+            <thead><tr><th>Менеджер</th><th>Почта</th><th>Заработано</th><th>Потрачено</th><th>Доступно</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <h2>История прокрутов (все)</h2>
+          <table id="all-history">
+            <thead><tr><th>Когда</th><th>Кто</th><th>Приз</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var me = null;
+  var prizes = [];
+  var spinning = false;
+  var currentRotation = 0;
+  var wheelCanvas = document.getElementById("wheel");
+  var ctx = wheelCanvas.getContext("2d");
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function toast(msg) {
+    var t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 2600);
+  }
+  function api(path, options) {
+    options = options || {};
+    options.headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+    return fetch(path, options).then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok) {
+          var err = new Error(data.message || data.error || ("HTTP " + r.status));
+          err.data = data;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
+  /* ---------------- auth ---------------- */
+
+  function showLogin() {
+    $("login-view").classList.remove("hidden");
+    $("app-view").classList.add("hidden");
+  }
+
+  function showApp() {
+    $("login-view").classList.add("hidden");
+    $("app-view").classList.remove("hidden");
+  }
+
+  $("login-btn").addEventListener("click", doLogin);
+  $("password").addEventListener("keydown", function (e) { if (e.key === "Enter") doLogin(); });
+
+  function doLogin() {
+    $("login-error").textContent = "";
+    api("/api/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("email").value, password: $("password").value })
+    }).then(function () {
+      return boot();
+    }).catch(function (e) {
+      $("login-error").textContent = e.message;
+    });
+  }
+
+  $("logout").addEventListener("click", function () {
+    api("/api/logout", { method: "POST", body: "{}" }).finally(showLogin);
+  });
+
+  /* ---------------- boot ---------------- */
+
+  function boot() {
+    return api("/api/me").then(function (data) {
+      me = data;
+      $("who").textContent = data.name ? data.name + " · " + data.email : data.email;
+      $("tab-admin").classList.toggle("hidden", !data.is_admin);
+      updateCoins();
+      showApp();
+      return loadPrizes().then(drawWheel).then(loadMyHistory);
+    });
+  }
+
+  function updateCoins() {
+    var a = me.coins.available;
+    $("coins-badge").textContent = a + " " + (a === 1 ? "коин" : (a >= 2 && a <= 4) ? "коина" : "коинов");
+    $("spin-btn").disabled = spinning || a <= 0;
+    $("spin-btn").textContent = a > 0 ? "Крутить!" : "Нет коинов — закройте сделку в успех";
+  }
+
+  function loadPrizes() {
+    return api("/api/prizes").then(function (data) {
+      prizes = data.prizes || [];
+    });
+  }
+
+  /* ---------------- wheel ---------------- */
+
+  var TWO_PI = Math.PI * 2;
+
+  function wheelSectors() {
+    var total = prizes.reduce(function (s, p) { return s + p.weight; }, 0);
+    var start = 0;
+    return prizes.map(function (p) {
+      var size = total > 0 ? 360 * p.weight / total : 0;
+      var sec = { start: start, size: size, prize: p };
+      start += size;
+      return sec;
+    });
+  }
+
+  function drawWheel(rotationDeg) {
+    var size = wheelCanvas.width;
+    var cx = size / 2, cy = size / 2, r = size / 2 - 8;
+    ctx.clearRect(0, 0, size, size);
+    if (!prizes.length) {
+      ctx.fillStyle = "#26304a";
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, TWO_PI); ctx.fill();
+      ctx.fillStyle = "#cdd7ee";
+      ctx.font = "bold 34px sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("Призы не настроены", cx, cy);
+      return;
+    }
+    var rot = (rotationDeg || 0) * Math.PI / 180;
+    wheelSectors().forEach(function (sec) {
+      var a0 = -Math.PI / 2 + (sec.start * Math.PI / 180) + rot;
+      var a1 = a0 + sec.size * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, r, a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = sec.prize.color;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,.35)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      if (sec.size > 6) {
+        var mid = (a0 + a1) / 2;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(mid);
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#fff";
+        ctx.shadowColor = "rgba(0,0,0,.55)";
+        ctx.shadowBlur = 6;
+        ctx.font = "bold " + Math.max(20, Math.min(30, sec.size * 1.6)) + "px sans-serif";
+        var label = sec.prize.name.length > 22 ? sec.prize.name.slice(0, 21) + "…" : sec.prize.name;
+        ctx.fillText(label, r - 26, 0);
+        ctx.restore();
+      }
+    });
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, TWO_PI);
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = "rgba(255,255,255,.18)";
+    ctx.stroke();
+  }
+
+  function animateTo(targetRotation, done) {
+    var startRot = currentRotation % 360;
+    var delta = ((targetRotation - startRot) % 360 + 360) % 360;
+    var total = delta + 360 * 6;
+    var dur = 5600;
+    var t0 = performance.now();
+    function frame(now) {
+      var k = Math.min(1, (now - t0) / dur);
+      var ease = 1 - Math.pow(1 - k, 4);
+      var rot = startRot + total * ease;
+      drawWheel(rot);
+      if (k < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        currentRotation = startRot + total;
+        done();
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  $("spin-btn").addEventListener("click", function () {
+    if (spinning) return;
+    spinning = true;
+    $("result").textContent = "";
+    $("result").classList.remove("win");
+    updateCoins();
+    api("/api/spin", { method: "POST", body: "{}" }).then(function (data) {
+      animateTo(data.rotation, function () {
+        spinning = false;
+        me.coins = data.coins;
+        updateCoins();
+        var r = $("result");
+        r.textContent = "🎉 " + data.prize.name;
+        r.classList.add("win");
+        loadMyHistory();
+      });
+    }).catch(function (e) {
+      spinning = false;
+      updateCoins();
+      toast(e.message);
+    });
+  });
+
+  /* ---------------- history ---------------- */
+
+  function fmtTime(ts) {
+    var d = new Date(ts * 1000);
+    function p(n) { return String(n).padStart(2, "0"); }
+    return p(d.getDate()) + "." + p(d.getMonth() + 1) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  function loadMyHistory() {
+    return api("/api/history").then(function (data) {
+      var tb = $("my-history").querySelector("tbody");
+      if (!me.is_admin) {
+        tb.innerHTML = (data.history || []).map(function (h) {
+          return "<tr><td>" + fmtTime(h.created_at) + "</td><td><b>" + esc(h.prize) + "</b></td></tr>";
+        }).join("") || '<tr><td colspan="2" style="color:#8fa0c4">Пока пусто</td></tr>';
+      } else {
+        renderAllHistory(data.history || []);
+      }
+    });
+  }
+
+  /* ---------------- admin ---------------- */
+
+  $("tab-wheel").addEventListener("click", function () { switchTab("wheel"); });
+  $("tab-admin").addEventListener("click", function () { switchTab("admin"); });
+
+  function switchTab(tab) {
+    $("tab-wheel").classList.toggle("active", tab === "wheel");
+    $("tab-admin").classList.toggle("active", tab === "admin");
+    $("wheel-view").classList.toggle("hidden", tab !== "wheel");
+    $("admin-view").classList.toggle("hidden", tab !== "admin");
+    if (tab === "admin") {
+      renderPrizeEditor();
+      loadUsers();
+      loadMyHistory();
+      $("amo-status").textContent = me.amo_connected ? "amoCRM подключён" : "amoCRM не настроен (config.json)";
+    }
+  }
+
+  function renderPrizeEditor() {
+    var wrap = $("prize-rows");
+    wrap.innerHTML = "";
+    prizes.forEach(function (p, i) {
+      wrap.appendChild(prizeRow(p, i));
+    });
+    updateSumHint();
+  }
+
+  function prizeRow(p) {
+    var row = document.createElement("div");
+    row.className = "prize-row";
+    row.innerHTML =
+      '<input type="text" class="p-name" placeholder="Название приза" value="' + esc(p.name) + '">' +
+      '<input type="number" class="p-weight" min="0" step="1" value="' + esc(p.weight) + '" title="Шанс, %">' +
+      '<input type="color" class="p-color" value="' + esc(p.color) + '">' +
+      '<button class="btn-small btn-del" title="Удалить">✕</button>';
+    row.querySelector(".btn-del").addEventListener("click", function () {
+      row.remove();
+      updateSumHint();
+    });
+    row.querySelector(".p-weight").addEventListener("input", updateSumHint);
+    return row;
+  }
+
+  function updateSumHint() {
+    var sum = 0;
+    document.querySelectorAll(".p-weight").forEach(function (el) {
+      sum += parseFloat(el.value) || 0;
+    });
+    $("sum-hint").textContent = "Сумма шансов: " + Math.round(sum * 100) / 100 +
+      "%. Шансы пересчитываются пропорционально — сумма не обязана быть 100%. Приз с шансом 0 скрывается из колеса.";
+  }
+
+  $("add-prize").addEventListener("click", function () {
+    var colors = ["#e74c3c", "#f39c12", "#27ae60", "#2980b9", "#8e44ad", "#16a085", "#d35400"];
+    var row = prizeRow({ name: "", weight: 10, color: colors[Math.floor(Math.random() * colors.length)] });
+    $("prize-rows").appendChild(row);
+    row.querySelector(".p-weight").addEventListener("input", updateSumHint);
+    updateSumHint();
+  });
+
+  $("save-prizes").addEventListener("click", function () {
+    var items = [];
+    document.querySelectorAll(".prize-row").forEach(function (row) {
+      items.push({
+        name: row.querySelector(".p-name").value,
+        weight: parseFloat(row.querySelector(".p-weight").value) || 0,
+        color: row.querySelector(".p-color").value
+      });
+    });
+    api("/api/prizes", { method: "POST", body: JSON.stringify({ prizes: items }) })
+      .then(function (data) {
+        prizes = data.prizes || [];
+        drawWheel(currentRotation);
+        renderPrizeEditor();
+        toast("Призы сохранены");
+      })
+      .catch(function (e) { toast(e.message); });
+  });
+
+  function loadUsers() {
+    api("/api/users").then(function (data) {
+      var tb = $("users-table").querySelector("tbody");
+      tb.innerHTML = (data.users || []).map(function (u) {
+        return "<tr><td>" + esc(u.name || "—") + (u.is_admin ? " 👑" : "") + "</td><td>" + esc(u.email || "—") +
+          "</td><td>" + u.earned + "</td><td>" + u.spent + "</td><td><b>" + u.available + "</b></td></tr>";
+      }).join("") || '<tr><td colspan="5" style="color:#8fa0c4">Пусто</td></tr>';
+    }).catch(function () {});
+  }
+
+  function renderAllHistory(list) {
+    var tb = $("all-history").querySelector("tbody");
+    if (!tb) return;
+    tb.innerHTML = list.map(function (h) {
+      return "<tr><td>" + fmtTime(h.created_at) + "</td><td>" + esc(h.name || h.email) + "</td><td><b>" + esc(h.prize) + "</b></td></tr>";
+    }).join("") || '<tr><td colspan="3" style="color:#8fa0c4">Пока пусто</td></tr>';
+  }
+
+  $("sync-btn").addEventListener("click", function () {
+    api("/api/sync", { method: "POST", body: "{}" })
+      .then(function (data) {
+        toast(data.reason ? data.reason : ("Синхронизировано: " + data.synced));
+        loadUsers();
+      })
+      .catch(function (e) { toast(e.message); });
+  });
+
+  /* ---------------- init ---------------- */
+
+  boot().catch(showLogin);
+})();
+</script>
+</body>
+</html>

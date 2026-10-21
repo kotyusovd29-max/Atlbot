@@ -1,0 +1,7 @@
+# Секреты и живые данные — в репозиторий не попадают
+config.json
+data.sqlite
+data.sqlite-*
+server.log
+__pycache__/
+*.pyc

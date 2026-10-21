@@ -1,0 +1,15 @@
+{
+  "amocrm": {
+    "subdomain": "yourcompany",
+    "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "client_secret": "INTEGRATION_SECRET",
+    "access_token": "ACCESS_TOKEN",
+    "refresh_token": "REFRESH_TOKEN",
+    "success_status_id": 142
+  },
+  "admins": [
+    "dmitryikotusov@f5.com.ru",
+    "orlov@f5.com.ru"
+  ],
+  "session_secret": ""
+}
