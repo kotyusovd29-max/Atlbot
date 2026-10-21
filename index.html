@@ -204,6 +204,40 @@
     z-index: 10;
   }
   #toast.show { opacity: 1; }
+
+  .rank-card {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    text-align: left;
+    margin: 0 auto 22px;
+    max-width: 560px;
+    padding: 16px 18px;
+    border-radius: 18px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .rank-badge { width: 92px; height: 110px; flex: 0 0 92px; }
+  .rank-badge svg { width: 100%; height: 100%; display: block; filter: drop-shadow(0 8px 12px rgba(0,0,0,.35)); }
+  .rank-name { font-size: 22px; font-weight: 800; letter-spacing: .04em; }
+  .rank-en { color: #9aa7c4; font-size: 13px; margin: 2px 0 10px; }
+  .rank-bar {
+    height: 12px;
+    border-radius: 99px;
+    background: rgba(255,255,255,0.08);
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .rank-bar i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #f0c14a, #ff7a3d);
+    transition: width .45s ease;
+  }
+  .rank-xp { margin-top: 8px; font-size: 13px; color: #cdd7ee; }
+  .rank-meta { flex: 1; min-width: 0; }
 </style>
 </head>
 <body>
@@ -235,6 +269,15 @@
 
   <main>
     <section id="wheel-view">
+      <div class="rank-card">
+        <div class="rank-badge" id="rank-badge"></div>
+        <div class="rank-meta">
+          <div class="rank-name" id="rank-name">Рекрут</div>
+          <div class="rank-en" id="rank-en">Herald</div>
+          <div class="rank-bar"><i id="rank-fill"></i></div>
+          <div class="rank-xp" id="rank-xp">0 XP</div>
+        </div>
+      </div>
       <div class="wheel-wrap">
         <div class="pointer"></div>
         <canvas id="wheel" width="880" height="880"></canvas>
@@ -274,7 +317,7 @@
           </div>
           <p class="sum-hint" style="margin-bottom:12px">Пароль нового пользователя — его почта. Бонус сразу даёт коины для прокрута.</p>
           <table id="users-table">
-            <thead><tr><th>Менеджер</th><th>Почта</th><th>Заработано</th><th>Потрачено</th><th>Доступно</th><th>Бонус</th></tr></thead>
+            <thead><tr><th>Менеджер</th><th>Почта</th><th>Ранг</th><th>Опыт</th><th>Коины</th><th>Дать коины</th><th>Дать опыт</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -376,6 +419,7 @@
       $("who").textContent = data.name ? data.name + " · " + data.email : data.email;
       $("tab-admin").classList.toggle("hidden", !data.is_admin);
       updateCoins();
+      renderRank();
       showApp();
       return loadPrizes().then(drawWheel).then(loadMyHistory);
     });
@@ -386,6 +430,54 @@
     $("coins-badge").textContent = a + " " + (a === 1 ? "коин" : (a >= 2 && a <= 4) ? "коина" : "коинов");
     $("spin-btn").disabled = spinning || a <= 0;
     $("spin-btn").textContent = a > 0 ? "Крутить!" : "Нет коинов — закройте сделку в успех";
+  }
+
+  function starRow(rank) {
+    if (!rank || rank.stars_max <= 1) return "";
+    var bits = [];
+    for (var i = 1; i <= rank.stars_max; i++) bits.push(i <= rank.star ? "★" : "☆");
+    return bits.join("");
+  }
+
+  function medalSvg(rank) {
+    var a = (rank.colors && rank.colors[0]) || "#d7b56d";
+    var b = (rank.colors && rank.colors[1]) || "#6f8f4e";
+    var gid = "m" + (rank.id || "x");
+    var stars = "";
+    if (rank.stars_max > 1) {
+      for (var i = 0; i < rank.stars_max; i++) {
+        var on = i < rank.star ? "#ffe08a" : "#3c445c";
+        var x = 14 + i * 15;
+        stars += '<polygon points="0,-6 1.8,-1.8 6,-1.8 2.6,1.2 3.8,6 0,3.2 -3.8,6 -2.6,1.2 -6,-1.8 -1.8,-1.8" transform="translate(' + x + ',12)" fill="' + on + '"/>';
+      }
+    } else {
+      stars = '<polygon points="0,-7 2,-2 7,-2 3,1.4 4.4,7 0,3.8 -4.4,7 -3,1.4 -7,-2 -2,-2" transform="translate(50,14)" fill="#ffe08a"/>';
+    }
+    return ''
+      + '<svg viewBox="0 0 100 118" aria-hidden="true">'
+      + '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="1" y2="1">'
+      + '<stop offset="0" stop-color="' + a + '"/><stop offset="1" stop-color="' + b + '"/>'
+      + '</linearGradient></defs>'
+      + stars
+      + '<path d="M50 24 L78 34 V62 C78 82 64 96 50 106 C36 96 22 82 22 62 V34 Z" fill="url(#' + gid + ')" stroke="rgba(255,255,255,.55)" stroke-width="2"/>'
+      + '<path d="M50 36 L66 44 V60 C66 72 58 82 50 88 C42 82 34 72 34 60 V44 Z" fill="rgba(0,0,0,.22)"/>'
+      + '<circle cx="50" cy="60" r="8" fill="rgba(255,255,255,.85)"/>'
+      + '</svg>';
+  }
+
+  function renderRank() {
+    var rank = me && me.rank;
+    if (!rank) return;
+    $("rank-badge").innerHTML = medalSvg(rank);
+    $("rank-name").textContent = rank.title;
+    $("rank-en").textContent = rank.name + (rank.stars_max > 1 ? "  " + starRow(rank) : "");
+    $("rank-fill").style.width = rank.percent + "%";
+    if (rank.maxed) {
+      $("rank-xp").textContent = rank.xp + " XP · максимальный ранг";
+    } else {
+      $("rank-xp").textContent = rank.xp + " / " + rank.next_xp + " XP · до " + rank.next_title
+        + (rank.next_star && rank.stars_max > 1 ? " " + rank.next_star : "");
+    }
   }
 
   function loadPrizes() {
@@ -607,11 +699,16 @@
       var tb = $("users-table").querySelector("tbody");
       tb.innerHTML = (data.users || []).map(function (u) {
         var mail = esc(u.email || "");
+        var tools = u.email
+          ? '<span style="display:flex;gap:6px"><input class="bonus-amount" type="number" min="1" max="1000" value="1" style="width:70px"><button type="button" class="btn-small give-bonus" data-email="' + mail + '">Коины</button></span>'
+          : "—";
+        var xpTools = u.email
+          ? '<span style="display:flex;gap:6px"><input class="xp-amount" type="number" min="1" max="100000" value="100" style="width:80px"><button type="button" class="btn-small give-xp" data-email="' + mail + '">Опыт</button></span>'
+          : "—";
         return "<tr><td>" + esc(u.name || "—") + (u.is_admin ? " 👑" : "") + "</td><td>" + (mail || "—") +
-          "</td><td>" + u.earned + "</td><td>" + u.spent + "</td><td><b>" + u.available + "</b></td><td>" +
-          (u.email ? '<span style="display:flex;gap:6px"><input class="bonus-amount" type="number" min="1" max="1000" value="1" style="width:70px"><button type="button" class="btn-small give-bonus" data-email="' + mail + '">Начислить</button></span>' : "—") +
-          "</td></tr>";
-      }).join("") || '<tr><td colspan="6" style="color:#8fa0c4">Пусто</td></tr>';
+          "</td><td>" + esc(u.rank_title || "—") + (u.rank_star && u.rank_id !== "immortal" ? " " + u.rank_star : "") +
+          "</td><td><b>" + (u.xp || 0) + "</b></td><td>" + u.available + "</td><td>" + tools + "</td><td>" + xpTools + "</td></tr>";
+      }).join("") || '<tr><td colspan="7" style="color:#8fa0c4">Пусто</td></tr>';
       tb.querySelectorAll(".give-bonus").forEach(function (btn) {
         btn.addEventListener("click", function () {
           var amount = parseInt(btn.parentNode.querySelector(".bonus-amount").value, 10);
@@ -620,6 +717,23 @@
             body: JSON.stringify({ email: btn.getAttribute("data-email"), amount: amount })
           }).then(function () {
             toast("Начислено");
+            loadUsers();
+          }).catch(function (e) { toast(e.message); });
+        });
+      });
+      tb.querySelectorAll(".give-xp").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var amount = parseInt(btn.parentNode.querySelector(".xp-amount").value, 10);
+          var email = btn.getAttribute("data-email");
+          api("/api/xp", {
+            method: "POST",
+            body: JSON.stringify({ email: email, amount: amount })
+          }).then(function (data) {
+            toast("Опыт начислен");
+            if (me && me.email === email) {
+              me.rank = data.rank;
+              renderRank();
+            }
             loadUsers();
           }).catch(function (e) { toast(e.message); });
         });

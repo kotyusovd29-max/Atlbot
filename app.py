@@ -145,6 +145,13 @@ def init_db():
             comment TEXT DEFAULT '',
             created_at INTEGER
         );
+        CREATE TABLE IF NOT EXISTS xp_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            comment TEXT DEFAULT '',
+            created_at INTEGER
+        );
         """)
         try:
             conn.execute("ALTER TABLE spins ADD COLUMN prize_name TEXT DEFAULT ''")
@@ -202,6 +209,85 @@ def coin_stats(conn, user_id):
                          (user_id,)).fetchone()["c"]
     earned += int(bonus or 0)
     return {"earned": earned, "spent": spent, "available": max(0, earned - spent)}
+
+
+# Медали по образцу лестницы Dota 2: 7 рангов по 5 звёзд и Титан.
+# Значки рисует страница сама, чужие картинки не используются.
+RANK_TIERS = [
+    ("herald", "Herald", "Рекрут", "#d7b56d", "#6f8f4e"),
+    ("guardian", "Guardian", "Страж", "#d5dde8", "#7f8c9b"),
+    ("crusader", "Crusader", "Рыцарь", "#7ed0cb", "#2f8f8c"),
+    ("archon", "Archon", "Герой", "#8dffc0", "#e0b341"),
+    ("legend", "Legend", "Легенда", "#f2c14e", "#c0392b"),
+    ("ancient", "Ancient", "Властелин", "#c9a6ff", "#6d4ca8"),
+    ("divine", "Divine", "Божество", "#8ebfff", "#f0c14a"),
+    ("immortal", "Immortal", "Титан", "#ffb347", "#ff5a1f"),
+]
+DEAL_XP = 100
+
+
+def rank_ladder():
+    levels = []
+    xp = 0
+    step = 100
+    for tier in RANK_TIERS:
+        stars = 1 if tier[0] == "immortal" else 5
+        for star in range(1, stars + 1):
+            levels.append({
+                "id": tier[0],
+                "name": tier[1],
+                "title": tier[2],
+                "star": star,
+                "stars_max": stars,
+                "xp": xp,
+                "colors": [tier[3], tier[4]],
+            })
+            xp += step
+            step += 25
+    return levels
+
+
+def user_xp(conn, user_id):
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) s FROM xp_grants WHERE user_id=?",
+        (user_id,),
+    ).fetchone()
+    return max(0, int(row["s"] or 0))
+
+
+def rank_state(conn, user_id):
+    xp = user_xp(conn, user_id)
+    levels = rank_ladder()
+    current = levels[0]
+    nxt = None
+    for i, level in enumerate(levels):
+        if xp >= level["xp"]:
+            current = level
+            nxt = levels[i + 1] if i + 1 < len(levels) else None
+        else:
+            break
+    if nxt is None:
+        into, span, percent = 1, 1, 100
+    else:
+        into = xp - current["xp"]
+        span = max(1, nxt["xp"] - current["xp"])
+        percent = max(0, min(100, int(round(100.0 * into / span))))
+    return {
+        "xp": xp,
+        "id": current["id"],
+        "name": current["name"],
+        "title": current["title"],
+        "star": current["star"],
+        "stars_max": current["stars_max"],
+        "colors": current["colors"],
+        "into": into,
+        "span": span,
+        "percent": percent,
+        "next_xp": None if nxt is None else nxt["xp"],
+        "next_title": None if nxt is None else nxt["title"],
+        "next_star": None if nxt is None else nxt["star"],
+        "maxed": nxt is None,
+    }
 
 
 def active_prizes(conn):
@@ -382,6 +468,10 @@ def process_webhook(raw: bytes):
                 (lead_id, user["id"], int(time.time())),
             )
             if cur.rowcount:
+                conn.execute(
+                    "INSERT INTO xp_grants(user_id, amount, comment, created_at) VALUES(?,?,?,?)",
+                    (user["id"], DEAL_XP, "Успешная сделка #%s" % lead_id, int(time.time())),
+                )
                 awarded.append({"lead_id": lead_id, "user_id": user["id"]})
     return awarded
 
@@ -472,6 +562,7 @@ class Handler(BaseHTTPRequestHandler):
                     "name": user["name"],
                     "is_admin": bool(user["is_admin"]),
                     "coins": coin_stats(conn, user["id"]),
+                    "rank": rank_state(conn, user["id"]),
                     "amo_connected": amo_configured(),
                 })
             elif path == "/api/prizes":
@@ -506,10 +597,15 @@ class Handler(BaseHTTPRequestHandler):
                 out = []
                 for r in rows:
                     st = coin_stats(conn, r["id"])
+                    rk = rank_state(conn, r["id"])
                     out.append({
                         "email": r["email"], "name": r["name"],
                         "is_admin": bool(r["is_admin"]),
-                        "amo_user_id": r["amo_user_id"], **st,
+                        "amo_user_id": r["amo_user_id"],
+                        "rank_title": rk["title"],
+                        "rank_star": rk["star"],
+                        "rank_id": rk["id"],
+                        **st, **{"xp": rk["xp"]},
                     })
                 self._json({"users": out})
             else:
@@ -675,6 +771,35 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     stats = coin_stats(conn, target["id"])
                 self._json({"ok": True, "email": email, "coins": stats})
+            elif path == "/api/xp":
+                admin = self._require_user(conn)
+                if admin is None:
+                    return
+                if not admin["is_admin"]:
+                    self._json({"error": "forbidden"}, 403)
+                    return
+                data = self._json_body()
+                email = (data.get("email") or "").strip().lower()
+                try:
+                    amount = int(data.get("amount"))
+                except (TypeError, ValueError):
+                    amount = 0
+                if "@" not in email:
+                    self._json({"error": "Укажите почту пользователя"}, 400)
+                    return
+                if amount < 1 or amount > 100000:
+                    self._json({"error": "Опыт: от 1 до 100000"}, 400)
+                    return
+                with _db_lock:
+                    target = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+                    if target is None:
+                        target = get_or_create_user(conn, email=email)
+                    conn.execute(
+                        "INSERT INTO xp_grants(user_id, amount, comment, created_at) VALUES(?,?,?,?)",
+                        (target["id"], amount, "Начислил администратор", int(time.time())),
+                    )
+                    state = rank_state(conn, target["id"])
+                self._json({"ok": True, "email": email, "rank": state})
             else:
                 self._json({"error": "not found"}, 404)
 
