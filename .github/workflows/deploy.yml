@@ -56,6 +56,7 @@ jobs:
           timeout: 40s
           command_timeout: 120s
           script: |
+            set -e
             mkdir -p /home/kotusov/projects/pr1
             bash /home/kotusov/projects/pr1/run.sh
             (crontab -l 2>/dev/null | grep -v "pr1-wheel" || true; echo "@reboot sleep 8 && bash /home/kotusov/projects/pr1/run.sh >> /home/kotusov/projects/pr1/server.log 2>&1 # pr1-wheel") | crontab -

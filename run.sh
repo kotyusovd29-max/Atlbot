@@ -21,7 +21,7 @@ for name in os.listdir("/proc"):
         raw = open("/proc/%d/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode()
     except Exception:
         continue
-    if "http.server" in raw or raw.strip().endswith("app.py") or "/app.py" in raw:
+    if "/home/kotusov/projects/pr1/app.py" in raw or ("http.server" in raw and "8000" in raw):
         try:
             os.kill(pid, signal.SIGTERM)
             print("stopped", pid)
@@ -73,19 +73,11 @@ public_code() {
 echo "=== listeners ==="
 (ss -tln || netstat -tln) 2>/dev/null | head -40 || true
 echo "=== nginx config mentions ==="
-grep -R "pr1.kotusov\|proxy_pass" /etc/nginx /etc/caddy 2>/dev/null | head -40 || true
+grep -R "pr1.kotusov\|proxy_pass" /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null | head -40 || true
 
-# Провоцируем свежую строку в error.log, чтобы увидеть upstream.
-curl -sk -m 8 -o /dev/null -w "public-before:%{http_code}\n" "$PUBLIC_URL" || true
-upstream=$(
-  tail -n 80 /var/log/nginx/error.log /var/log/nginx/*error*.log 2>/dev/null \
-    | grep "pr1.kotusov" \
-    | grep -oE '127\.0\.0\.1:[0-9]+' \
-    | tail -1 \
-    | cut -d: -f2 || true
-)
+upstream=$(grep -E "proxy_pass http://127.0.0.1:[0-9]+" /etc/nginx/sites-enabled/f5-kotusov-pr1 2>/dev/null | grep -oE '127\.0\.0\.1:[0-9]+' | head -1 | cut -d: -f2 || true)
 if [ -z "${upstream:-}" ]; then
-  upstream=8000
+  upstream=8101
 fi
 echo "upstream port: $upstream"
 
