@@ -138,6 +138,13 @@ def init_db():
             prize_name TEXT DEFAULT '',
             created_at INTEGER
         );
+        CREATE TABLE IF NOT EXISTS bonuses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            comment TEXT DEFAULT '',
+            created_at INTEGER
+        );
         """)
         try:
             conn.execute("ALTER TABLE spins ADD COLUMN prize_name TEXT DEFAULT ''")
@@ -170,6 +177,8 @@ def get_or_create_user(conn, email=None, amo_user_id=None, name=""):
             changed["name"] = name
         if email and not row["email"]:
             changed["email"] = email.strip().lower()
+        if amo_user_id and not row["amo_user_id"]:
+            changed["amo_user_id"] = amo_user_id
         if is_admin_email(email or row["email"]) and not row["is_admin"]:
             changed["is_admin"] = 1
         for k, v in changed.items():
@@ -187,8 +196,11 @@ def get_or_create_user(conn, email=None, amo_user_id=None, name=""):
 def coin_stats(conn, user_id):
     earned = conn.execute("SELECT COUNT(*) c FROM awards WHERE user_id=?",
                           (user_id,)).fetchone()["c"]
+    bonus = conn.execute("SELECT COALESCE(SUM(amount), 0) s FROM bonuses WHERE user_id=?",
+                         (user_id,)).fetchone()["s"]
     spent = conn.execute("SELECT COUNT(*) c FROM spins WHERE user_id=?",
                          (user_id,)).fetchone()["c"]
+    earned += int(bonus or 0)
     return {"earned": earned, "spent": spent, "available": max(0, earned - spent)}
 
 
@@ -376,6 +388,10 @@ def process_webhook(raw: bytes):
 
 # ---------------------------------------------------------------- http
 
+class ReuseServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AmoWheel/1.0"
@@ -389,6 +405,7 @@ class Handler(BaseHTTPRequestHandler):
               extra_headers=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
+        self._headers_sent = True
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -612,8 +629,65 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(sync_users_from_amo())
                 except Exception as e:
                     self._json({"error": str(e)}, 502)
+            elif path == "/api/users":
+                admin = self._require_user(conn)
+                if admin is None:
+                    return
+                if not admin["is_admin"]:
+                    self._json({"error": "forbidden"}, 403)
+                    return
+                data = self._json_body()
+                email = (data.get("email") or "").strip().lower()
+                name = str(data.get("name") or "").strip()[:80]
+                if "@" not in email:
+                    self._json({"error": "Укажите почту пользователя"}, 400)
+                    return
+                with _db_lock:
+                    created = get_or_create_user(conn, email=email, name=name)
+                self._json({"ok": True, "email": created["email"], "name": created["name"]})
+            elif path == "/api/bonus":
+                admin = self._require_user(conn)
+                if admin is None:
+                    return
+                if not admin["is_admin"]:
+                    self._json({"error": "forbidden"}, 403)
+                    return
+                data = self._json_body()
+                email = (data.get("email") or "").strip().lower()
+                try:
+                    amount = int(data.get("amount"))
+                except (TypeError, ValueError):
+                    amount = 0
+                comment = str(data.get("comment") or "").strip()[:200]
+                if "@" not in email:
+                    self._json({"error": "Укажите почту пользователя"}, 400)
+                    return
+                if amount < 1 or amount > 1000:
+                    self._json({"error": "Количество коинов: от 1 до 1000"}, 400)
+                    return
+                with _db_lock:
+                    target = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+                    if target is None:
+                        target = get_or_create_user(conn, email=email)
+                    conn.execute(
+                        "INSERT INTO bonuses(user_id, amount, comment, created_at) VALUES(?,?,?,?)",
+                        (target["id"], amount, comment, int(time.time())),
+                    )
+                    stats = coin_stats(conn, target["id"])
+                self._json({"ok": True, "email": email, "coins": stats})
             else:
                 self._json({"error": "not found"}, 404)
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except Exception as exc:
+            print("request error:", exc)
+            if not getattr(self, "_headers_sent", False):
+                try:
+                    self._json({"error": "server error"}, 500)
+                except Exception:
+                    pass
 
 
 def main():
@@ -623,7 +697,7 @@ def main():
             print("amo sync:", sync_users_from_amo())
         except Exception as e:
             print("amo sync failed:", e)
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ReuseServer(("0.0.0.0", PORT), Handler)
     print("AmoWheel listening on 0.0.0.0:%d" % PORT)
     server.serve_forever()
 

@@ -267,8 +267,14 @@
             <button class="btn-small" id="sync-btn">Синхронизировать с amoCRM</button>
             <span class="sum-hint" id="amo-status"></span>
           </div>
+          <div class="prize-row" style="grid-template-columns: 1.2fr 1fr auto; margin-bottom: 14px;">
+            <input id="new-email" type="email" placeholder="Почта нового пользователя">
+            <input id="new-name" type="text" placeholder="Имя">
+            <button class="btn-small" id="add-user" type="button">Добавить</button>
+          </div>
+          <p class="sum-hint" style="margin-bottom:12px">Пароль нового пользователя — его почта. Бонус сразу даёт коины для прокрута.</p>
           <table id="users-table">
-            <thead><tr><th>Менеджер</th><th>Почта</th><th>Заработано</th><th>Потрачено</th><th>Доступно</th></tr></thead>
+            <thead><tr><th>Менеджер</th><th>Почта</th><th>Заработано</th><th>Потрачено</th><th>Доступно</th><th>Бонус</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -314,7 +320,13 @@
     options = options || {};
     options.headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
     return fetch(path, options).then(function (r) {
-      return r.json().then(function (data) {
+      return r.text().then(function (text) {
+        var data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error("Сервер ещё не переключился на приложение. Обновите страницу через минуту.");
+        }
         if (!r.ok) {
           var err = new Error(data.message || data.error || ("HTTP " + r.status));
           err.data = data;
@@ -594,11 +606,38 @@
     api("/api/users").then(function (data) {
       var tb = $("users-table").querySelector("tbody");
       tb.innerHTML = (data.users || []).map(function (u) {
-        return "<tr><td>" + esc(u.name || "—") + (u.is_admin ? " 👑" : "") + "</td><td>" + esc(u.email || "—") +
-          "</td><td>" + u.earned + "</td><td>" + u.spent + "</td><td><b>" + u.available + "</b></td></tr>";
-      }).join("") || '<tr><td colspan="5" style="color:#8fa0c4">Пусто</td></tr>';
+        var mail = esc(u.email || "");
+        return "<tr><td>" + esc(u.name || "—") + (u.is_admin ? " 👑" : "") + "</td><td>" + (mail || "—") +
+          "</td><td>" + u.earned + "</td><td>" + u.spent + "</td><td><b>" + u.available + "</b></td><td>" +
+          (u.email ? '<span style="display:flex;gap:6px"><input class="bonus-amount" type="number" min="1" max="1000" value="1" style="width:70px"><button type="button" class="btn-small give-bonus" data-email="' + mail + '">Начислить</button></span>' : "—") +
+          "</td></tr>";
+      }).join("") || '<tr><td colspan="6" style="color:#8fa0c4">Пусто</td></tr>';
+      tb.querySelectorAll(".give-bonus").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var amount = parseInt(btn.parentNode.querySelector(".bonus-amount").value, 10);
+          api("/api/bonus", {
+            method: "POST",
+            body: JSON.stringify({ email: btn.getAttribute("data-email"), amount: amount })
+          }).then(function () {
+            toast("Начислено");
+            loadUsers();
+          }).catch(function (e) { toast(e.message); });
+        });
+      });
     }).catch(function () {});
   }
+
+  $("add-user").addEventListener("click", function () {
+    api("/api/users", {
+      method: "POST",
+      body: JSON.stringify({ email: $("new-email").value, name: $("new-name").value })
+    }).then(function (data) {
+      toast("Пользователь " + data.email + " добавлен. Пароль — эта почта.");
+      $("new-email").value = "";
+      $("new-name").value = "";
+      loadUsers();
+    }).catch(function (e) { toast(e.message); });
+  });
 
   function renderAllHistory(list) {
     var tb = $("all-history").querySelector("tbody");
