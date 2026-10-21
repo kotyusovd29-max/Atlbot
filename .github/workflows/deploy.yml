@@ -26,6 +26,11 @@ jobs:
             exit 1
           fi
           echo "Ключ найден, длина ${#SSH_KEY} символов."
+          if [ -z "${{ secrets.F5_SSH_PASSPHRASE }}" ]; then
+            echo "Секрет F5_SSH_PASSPHRASE пустой. Ключ f5_team защищён паролем — добавьте этот пароль в секрет."
+            exit 1
+          fi
+          echo "Пароль ключа задан."
 
       - name: Copy files
         uses: appleboy/scp-action@v0.1.7
