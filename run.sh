@@ -1,20 +1,16 @@
 #!/bin/bash
-# Поднимает приложение отдельной сессией, чтобы оно не умерло вместе с SSH деплоя.
+# Запускает приложение так, чтобы его видел nginx на https://pr1.kotusov.f5-vibe.ru/
 set -u
 cd /home/kotusov/projects/pr1
+loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
 
-PORT=8000
-proxy=$(grep -R "pr1.kotusov" -n /etc/nginx /etc/caddy 2>/dev/null | grep -oE '127\.0\.0\.1:[0-9]+|localhost:[0-9]+' | head -1 | cut -d: -f2 || true)
-if [ -n "${proxy:-}" ]; then
-  PORT="$proxy"
-fi
-echo "using port $PORT"
-export PORT
+PUBLIC_URL="https://pr1.kotusov.f5-vibe.ru/api/login"
+LOGIN_BODY='{"email":"dmitryikotusov@f5.com.ru","password":"dmitryikotusov@f5.com.ru"}'
 
-python3 - << 'PY'
+stop_old() {
+  python3 - << 'PY'
 import os, signal
-me = os.getpid()
-parent = os.getppid()
+me, parent = os.getpid(), os.getppid()
 for name in os.listdir("/proc"):
     if not name.isdigit():
         continue
@@ -32,9 +28,10 @@ for name in os.listdir("/proc"):
         except Exception as exc:
             print("cannot stop", pid, exc)
 PY
+}
 
-sleep 1
-PORT="$PORT" python3 - << 'PY'
+start_on() {
+  PORT="$1" python3 - << 'PY'
 import os, subprocess
 log = open("/home/kotusov/projects/pr1/server.log", "a")
 env = os.environ.copy()
@@ -47,38 +44,65 @@ proc = subprocess.Popen(
     stdout=log,
     stderr=subprocess.STDOUT,
 )
-print("started", proc.pid)
 open("/home/kotusov/projects/pr1/app.pid", "w").write(str(proc.pid))
+print("started", proc.pid, "port", env.get("PORT"))
 PY
+}
 
-sleep 1
-pid=$(cat /home/kotusov/projects/pr1/app.pid)
-if ! kill -0 "$pid" 2>/dev/null; then
-  echo "process died immediately"
-  tail -40 /home/kotusov/projects/pr1/server.log || true
-  exit 1
+wait_local() {
+  port="$1"
+  i=0
+  while [ "$i" -lt 8 ]; do
+    body=$(curl -sS -m 3 -H "Content-Type: application/json" -d "$LOGIN_BODY" \
+      "http://127.0.0.1:${port}/api/login" || true)
+    echo "local:${port} ${body}"
+    case "$body" in
+      *'"ok": true'*) return 0 ;;
+    esac
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+
+public_code() {
+  curl -sk -m 8 -o /tmp/pr1-public.txt -w "%{http_code}" \
+    -H "Content-Type: application/json" -d "$LOGIN_BODY" "$PUBLIC_URL" || true
+}
+
+echo "=== listeners ==="
+(ss -tln || netstat -tln) 2>/dev/null | head -40 || true
+echo "=== nginx config mentions ==="
+grep -R "pr1.kotusov\|proxy_pass" /etc/nginx /etc/caddy 2>/dev/null | head -40 || true
+
+# Провоцируем свежую строку в error.log, чтобы увидеть upstream.
+curl -sk -m 8 -o /dev/null -w "public-before:%{http_code}\n" "$PUBLIC_URL" || true
+upstream=$(
+  tail -n 80 /var/log/nginx/error.log /var/log/nginx/*error*.log 2>/dev/null \
+    | grep "pr1.kotusov" \
+    | grep -oE '127\.0\.0\.1:[0-9]+' \
+    | tail -1 \
+    | cut -d: -f2 || true
+)
+if [ -z "${upstream:-}" ]; then
+  upstream=8000
 fi
+echo "upstream port: $upstream"
 
-ok=0
-for _ in 1 2 3 4 5 6; do
-  body=$(curl -sS -m 3 -H "Content-Type: application/json" \
-    -d '{"email":"dmitryikotusov@f5.com.ru","password":"dmitryikotusov@f5.com.ru"}' \
-    "http://127.0.0.1:${PORT}/api/login" || true)
-  echo "login-check: $body"
-  case "$body" in
-    *'"ok": true'*) ok=1; break ;;
-  esac
-  sleep 1
-done
-
-if [ "$ok" != 1 ]; then
+stop_old
+sleep 1
+start_on "$upstream"
+if ! wait_local "$upstream"; then
   echo "----- server.log -----"
   tail -40 /home/kotusov/projects/pr1/server.log || true
   exit 1
 fi
-# Процесс в новой сессии должен пережить закрытие SSH.
-if ! kill -0 "$pid" 2>/dev/null; then
-  echo "process disappeared after check"
+
+code=$(public_code)
+echo "public-after:${code} $(head -c 180 /tmp/pr1-public.txt 2>/dev/null || true)"
+if [ "$code" != "200" ]; then
+  echo "----- nginx error -----"
+  tail -n 20 /var/log/nginx/error.log /var/log/nginx/*error*.log 2>/dev/null || true
   exit 1
 fi
-echo "APP_OK pid=$pid port=$PORT"
+echo "APP_OK port=$upstream"

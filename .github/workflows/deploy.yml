@@ -54,7 +54,7 @@ jobs:
           passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
           port: 22
           timeout: 40s
-          command_timeout: 90s
+          command_timeout: 120s
           script: |
             mkdir -p /home/kotusov/projects/pr1
             bash /home/kotusov/projects/pr1/run.sh
