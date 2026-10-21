@@ -325,7 +325,7 @@
         try {
           data = JSON.parse(text);
         } catch (e) {
-          throw new Error("Сервер ещё не переключился на приложение. Обновите страницу через минуту.");
+          throw new Error("Сервер вернул не данные входа (" + r.status + "). Обновите страницу.");
         }
         if (!r.ok) {
           var err = new Error(data.message || data.error || ("HTTP " + r.status));

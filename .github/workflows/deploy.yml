@@ -41,7 +41,7 @@ jobs:
           passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
           port: 22
           timeout: 40s
-          source: "app.py,index.html"
+          source: "app.py,index.html,run.sh"
           target: /home/kotusov/projects/pr1
           overwrite: true
 
@@ -54,46 +54,8 @@ jobs:
           passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
           port: 22
           timeout: 40s
-          command_timeout: 60s
+          command_timeout: 90s
           script: |
             mkdir -p /home/kotusov/projects/pr1
-            python3 - << 'PY'
-            import os, signal
-            me, parent = os.getpid(), os.getppid()
-            inodes = set()
-            for fn in ("/proc/net/tcp", "/proc/net/tcp6"):
-                try:
-                    lines = open(fn).read().splitlines()[1:]
-                except Exception:
-                    continue
-                for line in lines:
-                    parts = line.split()
-                    local, state, inode = parts[1], parts[3], parts[9]
-                    if state == "0A" and local.rsplit(":", 1)[-1].upper() == "1F40":
-                        inodes.add(inode)
-            for name in os.listdir("/proc"):
-                if not name.isdigit():
-                    continue
-                pid = int(name)
-                if pid in (me, parent):
-                    continue
-                fd_dir = "/proc/%d/fd" % pid
-                try:
-                    fds = os.listdir(fd_dir)
-                except Exception:
-                    continue
-                for fd in fds:
-                    try:
-                        target = os.readlink("%s/%s" % (fd_dir, fd))
-                    except Exception:
-                        continue
-                    if target.startswith("socket:[") and target[8:-1] in inodes:
-                        os.kill(pid, signal.SIGTERM)
-                        break
-            PY
-            sleep 1
-            cd /home/kotusov/projects/pr1
-            python3 -c 'import subprocess; subprocess.Popen(["/usr/bin/python3","app.py"], cwd="/home/kotusov/projects/pr1", start_new_session=True, stdin=subprocess.DEVNULL, stdout=open("/home/kotusov/projects/pr1/server.log","a"), stderr=subprocess.STDOUT)'
-            (crontab -l 2>/dev/null | grep -v "pr1-wheel" || true; echo "@reboot sleep 8 && cd /home/kotusov/projects/pr1 && /usr/bin/python3 app.py >> /home/kotusov/projects/pr1/server.log 2>&1 # pr1-wheel") | crontab -
-            sleep 1
-            curl -sf -o /dev/null -w "app:%{http_code}\n" http://127.0.0.1:8000/
+            bash /home/kotusov/projects/pr1/run.sh
+            (crontab -l 2>/dev/null | grep -v "pr1-wheel" || true; echo "@reboot sleep 8 && bash /home/kotusov/projects/pr1/run.sh >> /home/kotusov/projects/pr1/server.log 2>&1 # pr1-wheel") | crontab -
