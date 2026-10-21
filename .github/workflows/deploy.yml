@@ -7,29 +7,54 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Deploy to f5 server
+      - name: Check SSH key secret
         env:
           SSH_KEY: ${{ secrets.F5_SSH_KEY }}
         run: |
           set -e
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/f5_team
-          chmod 600 ~/.ssh/f5_team
-          ssh-keyscan -H 89.169.3.47 >> ~/.ssh/known_hosts 2>/dev/null
-          SSH="ssh -o IdentitiesOnly=yes -o ConnectTimeout=20 -i ~/.ssh/f5_team kotusov@89.169.3.47"
-          SCP="scp -o IdentitiesOnly=yes -o ConnectTimeout=20 -i ~/.ssh/f5_team"
-          $SSH 'mkdir -p /home/kotusov/projects/pr1'
-          $SCP app.py index.html kotusov@89.169.3.47:/home/kotusov/projects/pr1/
-          $SSH 'set -e
+          if [ -z "$SSH_KEY" ]; then
+            echo "Секрет F5_SSH_KEY пустой. Добавьте приватный ключ ~/.ssh/f5_team целиком."
+            exit 1
+          fi
+          if ! printf '%s\n' "$SSH_KEY" | grep -q "BEGIN .*PRIVATE KEY"; then
+            echo "Секрет F5_SSH_KEY не похож на приватный ключ (нет строки BEGIN ... PRIVATE KEY)."
+            echo "Нужен файл ~/.ssh/f5_team целиком, включая BEGIN и END."
+            exit 1
+          fi
+          echo "Ключ найден, длина ${#SSH_KEY} символов."
+
+      - name: Copy files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 89.169.3.47
+          username: kotusov
+          key: ${{ secrets.F5_SSH_KEY }}
+          port: 22
+          timeout: 40s
+          source: "app.py,index.html"
+          target: /home/kotusov/projects/pr1
+          overwrite: true
+
+      - name: Restart app
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: 89.169.3.47
+          username: kotusov
+          key: ${{ secrets.F5_SSH_KEY }}
+          port: 22
+          timeout: 40s
+          script_stop: true
+          script: |
+            mkdir -p /home/kotusov/projects/pr1
             pkill -f "projects/pr1/app.py" 2>/dev/null || true
             pkill -f "http.server 8000" 2>/dev/null || true
             sleep 1
             cd /home/kotusov/projects/pr1
-            python3 -c "import os,subprocess; subprocess.Popen([\"/usr/bin/python3\",\"app.py\"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=open(\"server.log\",\"a\"), stderr=subprocess.STDOUT)"
+            python3 -c 'import subprocess; subprocess.Popen(["/usr/bin/python3","app.py"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=open("server.log","a"), stderr=subprocess.STDOUT)'
             (crontab -l 2>/dev/null | grep -v "projects/pr1"; echo "@reboot sleep 8 && cd /home/kotusov/projects/pr1 && /usr/bin/python3 app.py >> /home/kotusov/projects/pr1/server.log 2>&1") | crontab -
             sleep 1
-            curl -sf -o /dev/null -w "app:%{http_code}\n" http://127.0.0.1:8000/'
+            curl -sf -o /dev/null -w "app:%{http_code}\n" http://127.0.0.1:8000/
