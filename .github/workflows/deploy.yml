@@ -54,14 +54,30 @@ jobs:
           passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
           port: 22
           timeout: 40s
-          script_stop: true
+          command_timeout: 60s
           script: |
             mkdir -p /home/kotusov/projects/pr1
-            pkill -f "projects/pr1/app.py" 2>/dev/null || true
-            pkill -f "http.server 8000" 2>/dev/null || true
+            python3 - << 'PY'
+            import os, signal
+            me, parent = os.getpid(), os.getppid()
+            for name in os.listdir("/proc"):
+                if not name.isdigit():
+                    continue
+                pid = int(name)
+                if pid in (me, parent):
+                    continue
+                try:
+                    cmd = open("/proc/%d/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode()
+                    cwd = os.readlink("/proc/%d/cwd" % pid)
+                except Exception:
+                    continue
+                stop = ("app.py" in cmd and cwd.endswith("/projects/pr1")) or ("http.server" in cmd and " 8000" in cmd)
+                if stop:
+                    os.kill(pid, signal.SIGTERM)
+            PY
             sleep 1
             cd /home/kotusov/projects/pr1
-            python3 -c 'import subprocess; subprocess.Popen(["/usr/bin/python3","app.py"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=open("server.log","a"), stderr=subprocess.STDOUT)'
-            (crontab -l 2>/dev/null | grep -v "projects/pr1"; echo "@reboot sleep 8 && cd /home/kotusov/projects/pr1 && /usr/bin/python3 app.py >> /home/kotusov/projects/pr1/server.log 2>&1") | crontab -
+            python3 -c 'import subprocess; subprocess.Popen(["/usr/bin/python3","app.py"], cwd="/home/kotusov/projects/pr1", start_new_session=True, stdin=subprocess.DEVNULL, stdout=open("/home/kotusov/projects/pr1/server.log","a"), stderr=subprocess.STDOUT)'
+            (crontab -l 2>/dev/null | grep -v "pr1-wheel" || true; echo "@reboot sleep 8 && cd /home/kotusov/projects/pr1 && /usr/bin/python3 app.py >> /home/kotusov/projects/pr1/server.log 2>&1 # pr1-wheel") | crontab -
             sleep 1
             curl -sf -o /dev/null -w "app:%{http_code}\n" http://127.0.0.1:8000/
