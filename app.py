@@ -32,7 +32,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DB_PATH = os.path.join(BASE_DIR, "data.sqlite")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
-PORT = 8000
+PORT = int(os.environ.get("PORT", "8000"))
 
 DEFAULT_CONFIG = {
     "amocrm": {
