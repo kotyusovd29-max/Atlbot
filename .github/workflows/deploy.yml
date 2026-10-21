@@ -33,6 +33,7 @@ jobs:
           host: 89.169.3.47
           username: kotusov
           key: ${{ secrets.F5_SSH_KEY }}
+          passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
           port: 22
           timeout: 40s
           source: "app.py,index.html"
@@ -45,6 +46,7 @@ jobs:
           host: 89.169.3.47
           username: kotusov
           key: ${{ secrets.F5_SSH_KEY }}
+          passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
           port: 22
           timeout: 40s
           script_stop: true
