@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 """Страница пакетов ТТН и Telegram-бот. Только стандартная библиотека Python 3."""
 
+import http.client
 import json
 import mimetypes
 import os
 import re
 import secrets
+import socket
 import sqlite3
+import ssl
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -35,6 +36,7 @@ NEED_BUTTON = "Нажмите «Отправить новый пакет док�
 DONE = "Пакет документов получен: ТТН погрузки и ТТН отгрузки."
 GOT_LOAD = "ТТН погрузки получена."
 FILE_FAIL = "Не удалось получить файл. Пришлите его ещё раз."
+TOO_BIG = "Файл больше 20 МБ, Telegram его не отдаёт. Пришлите фото или файл меньшего размера."
 STALE = "Этот файл уже не относится к текущему шагу. Нажмите кнопку и отправьте документ ещё раз."
 
 PREVIEW_MIME = {"image/jpeg", "image/png", "image/gif", "image/webp"}
@@ -55,6 +57,43 @@ _flood_wait = 0
 class TelegramBusy(Exception):
     def __init__(self, retry_after):
         self.retry_after = max(1, int(retry_after or 1))
+
+
+class TelegramFileTooBig(Exception):
+    pass
+
+
+_ssl_ctx = ssl.create_default_context()
+
+
+class IPv4HTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        port = self.port or 443
+        infos = socket.getaddrinfo(self.host, port, socket.AF_INET, socket.SOCK_STREAM)
+        last = None
+        for family, socktype, proto, _canon, addr in infos:
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.settimeout(self.timeout)
+                sock.connect(addr)
+                self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+                return
+            except Exception as exc:
+                last = exc
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        raise last or OSError("telegram connect")
+
+
+def telegram_open(method, path, body=None, timeout=20):
+    conn = IPv4HTTPSConnection("api.telegram.org", 443, timeout=timeout, context=_ssl_ctx)
+    headers = {"User-Agent": "ttn-bot", "Connection": "close"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    conn.request(method, path, body=body, headers=headers)
+    return conn, conn.getresponse()
 
 
 def load_config():
@@ -232,39 +271,49 @@ def keyboard():
     }
 
 
-def tg_call(method, payload=None, query=None, timeout=30):
+def _telegram_error(method, status, raw):
+    detail = ""
+    retry_after = 0
+    try:
+        parsed_error = json.loads(raw.decode("utf-8", "replace"))
+        detail = str(parsed_error.get("description") or "")[:200]
+        retry_after = int((parsed_error.get("parameters") or {}).get("retry_after") or 0)
+    except Exception:
+        detail = ""
+    print("telegram http", method, status, detail)
+    if status == 429 or retry_after:
+        raise TelegramBusy(retry_after or 2)
+    if "too big" in detail.lower():
+        raise TelegramFileTooBig()
+    raise RuntimeError("telegram")
+
+
+def tg_call(method, payload=None, query=None, timeout=20):
     token = (CONFIG.get("bot_token") or "").strip()
     if not token:
         raise RuntimeError("no token")
-    url = "https://api.telegram.org/bot%s/%s" % (token, method)
-    data = None
-    headers = {}
+    path = "/bot%s/%s" % (token, method)
+    body = None
     if query:
-        url += "?" + urllib.parse.urlencode(query)
+        path += "?" + urllib.parse.urlencode(query)
     if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers)
+        body = json.dumps(payload).encode("utf-8")
+    conn = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        retry_after = 0
-        try:
-            parsed_error = json.loads(exc.read().decode("utf-8", "replace"))
-            detail = str(parsed_error.get("description") or "")[:200]
-            retry_after = int((parsed_error.get("parameters") or {}).get("retry_after") or 0)
-        except Exception:
-            detail = ""
-        print("telegram http", method, exc.code, detail)
-        if exc.code == 429 or retry_after:
-            raise TelegramBusy(retry_after or 2)
+        conn, resp = telegram_open("POST" if body is not None else "GET", path, body, timeout)
+        raw = resp.read()
+        status = resp.status
+    except TelegramBusy:
         raise
     except Exception as exc:
         print("telegram error", method, type(exc).__name__)
         raise
-    parsed = json.loads(body.decode("utf-8"))
+    finally:
+        if conn is not None:
+            conn.close()
+    if status >= 400:
+        _telegram_error(method, status, raw)
+    parsed = json.loads(raw.decode("utf-8"))
     if not parsed.get("ok"):
         print("telegram api", method, "not ok")
         raise RuntimeError("telegram")
@@ -274,7 +323,7 @@ def tg_call(method, payload=None, query=None, timeout=30):
 def reply(chat_id, text):
     global _last_send, _flood_wait
     with _send_lock:
-        wait = _last_send + 1.1 - time.time()
+        wait = _last_send + 0.4 - time.time()
         if wait > 0:
             time.sleep(wait)
         try:
@@ -294,27 +343,32 @@ def reply(chat_id, text):
             return False
 
 
-def fetch_file(file_id, dest_path):
-    meta = tg_call("getFile", query={"file_id": file_id})
-    file_path = (meta or {}).get("file_path") or ""
-    if not file_path or ".." in file_path:
-        raise RuntimeError("file path")
+def _save_telegram_file(file_path, dest_path):
     token = (CONFIG.get("bot_token") or "").strip()
-    url = "https://api.telegram.org/file/bot%s/%s" % (token, file_path)
-    req = urllib.request.Request(url)
+    parts = [part for part in file_path.split("/") if part and part != ".."]
+    if not parts:
+        raise RuntimeError("file path")
+    path = "/file/bot%s/%s" % (token, "/".join(urllib.parse.quote(part) for part in parts))
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     tmp = dest_path + ".part"
+    conn = None
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
-            total = 0
+        conn, resp = telegram_open("GET", path, timeout=25)
+        if resp.status >= 400:
+            raw = resp.read(800)
+            _telegram_error("file", resp.status, raw)
+        total = 0
+        with open(tmp, "wb") as out:
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
                     break
                 total += len(chunk)
                 if total > MAX_BYTES:
-                    raise RuntimeError("too big")
+                    raise TelegramFileTooBig()
                 out.write(chunk)
+        if total <= 0:
+            raise RuntimeError("empty file")
         os.replace(tmp, dest_path)
     except Exception:
         try:
@@ -322,7 +376,28 @@ def fetch_file(file_id, dest_path):
         except OSError:
             pass
         raise
-    return file_path
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def fetch_file(file_id, dest_path):
+    last = None
+    for attempt in range(3):
+        try:
+            meta = tg_call("getFile", query={"file_id": file_id}, timeout=15)
+            file_path = (meta or {}).get("file_path") or ""
+            if not file_path:
+                raise RuntimeError("file path")
+            _save_telegram_file(file_path, dest_path)
+            return file_path
+        except TelegramFileTooBig:
+            raise
+        except Exception as exc:
+            last = exc
+            print("download attempt", attempt + 1, type(exc).__name__)
+            time.sleep(0.5 + attempt)
+    raise last or RuntimeError("download")
 
 
 def start_packet(conn, user):
@@ -389,9 +464,12 @@ def store_incoming(user, info, generation, slot, package_id):
     tmp_path = os.path.join(tmp_dir, "%s-%s" % (uid, secrets.token_hex(8)))
     try:
         remote_path = fetch_file(info["file_id"], tmp_path)
-    except Exception:
-        print("download failed")
-        return "retry"
+    except TelegramFileTooBig:
+        print("download too big")
+        return "too_big"
+    except Exception as exc:
+        print("download failed", type(exc).__name__)
+        return "fail"
     ext = safe_ext(info.get("name"), remote_path)
     with _db_lock, db() as conn:
         if slot == "loading":
@@ -459,9 +537,12 @@ def handle_message(message):
 
     slot = "loading" if state == "await_loading" else "unloading"
     result = store_incoming(user, incoming, generation, slot, package_id)
-    if result == "retry":
+    if result == "too_big":
+        reply(chat["id"], TOO_BIG)
+        return "ok"
+    if result == "fail":
         reply(chat["id"], FILE_FAIL)
-        return "retry"
+        return "ok"
     if result == "stale":
         if not reply(chat["id"], STALE):
             return "retry"
@@ -617,11 +698,11 @@ def poll_telegram():
         time.sleep(3)
     offset = None
     while True:
-        query = {"timeout": 10, "allowed_updates": json.dumps(["message"])}
+        query = {"timeout": 2, "allowed_updates": json.dumps(["message"])}
         if offset is not None:
             query["offset"] = offset
         try:
-            updates = tg_call("getUpdates", query=query, timeout=20) or []
+            updates = tg_call("getUpdates", query=query, timeout=8) or []
         except TelegramBusy as exc:
             print("poll busy", exc.retry_after)
             time.sleep(exc.retry_after)
