@@ -47,6 +47,14 @@ DEFAULT_CONFIG = {
 
 _db_lock = threading.Lock()
 _bot_lock = threading.Lock()
+_send_lock = threading.Lock()
+_last_send = 0.0
+_flood_wait = 0
+
+
+class TelegramBusy(Exception):
+    def __init__(self, retry_after):
+        self.retry_after = max(1, int(retry_after or 1))
 
 
 def load_config():
@@ -183,8 +191,8 @@ def set_dialog(conn, uid, state, package_id, generation):
 
 
 def is_new_packet(text):
-    value = (text or "").strip()
-    if value == BTN:
+    value = " ".join((text or "").split())
+    if value == BTN or "новый пакет" in value.casefold():
         return True
     return value == "/new" or value.startswith("/start")
 
@@ -242,12 +250,16 @@ def tg_call(method, payload=None, query=None, timeout=30):
             body = resp.read()
     except urllib.error.HTTPError as exc:
         detail = ""
+        retry_after = 0
         try:
             parsed_error = json.loads(exc.read().decode("utf-8", "replace"))
             detail = str(parsed_error.get("description") or "")[:200]
+            retry_after = int((parsed_error.get("parameters") or {}).get("retry_after") or 0)
         except Exception:
             detail = ""
         print("telegram http", method, exc.code, detail)
+        if exc.code == 429 or retry_after:
+            raise TelegramBusy(retry_after or 2)
         raise
     except Exception as exc:
         print("telegram error", method, type(exc).__name__)
@@ -260,16 +272,26 @@ def tg_call(method, payload=None, query=None, timeout=30):
 
 
 def reply(chat_id, text):
-    try:
-        tg_call("sendMessage", {
-            "chat_id": chat_id,
-            "text": text,
-            "reply_markup": keyboard(),
-        })
-        return True
-    except Exception:
-        print("reply failed")
-        return False
+    global _last_send, _flood_wait
+    with _send_lock:
+        wait = _last_send + 1.1 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            tg_call("sendMessage", {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_markup": keyboard(),
+            })
+            _last_send = time.time()
+            return True
+        except TelegramBusy as exc:
+            _flood_wait = max(_flood_wait, exc.retry_after)
+            print("reply busy", exc.retry_after)
+            return False
+        except Exception:
+            print("reply failed")
+            return False
 
 
 def fetch_file(file_id, dest_path):
@@ -412,6 +434,7 @@ def handle_message(message):
         return "ok"
     text = message.get("text") or ""
     incoming = extract_file(message)
+    print("in", chat.get("id"), "text" if text else ("file" if incoming else "other"))
 
     if is_new_packet(text):
         with _db_lock, db() as conn:
@@ -581,6 +604,7 @@ def resolve_stored_file(package_id, slot):
 
 
 def poll_telegram():
+    global _flood_wait
     token = (CONFIG.get("bot_token") or "").strip()
     if not token:
         print("bot token empty, polling disabled")
@@ -593,18 +617,26 @@ def poll_telegram():
         time.sleep(3)
     offset = None
     while True:
-        query = {"timeout": 25, "allowed_updates": json.dumps(["message"])}
+        query = {"timeout": 10, "allowed_updates": json.dumps(["message"])}
         if offset is not None:
             query["offset"] = offset
         try:
-            updates = tg_call("getUpdates", query=query, timeout=40) or []
+            updates = tg_call("getUpdates", query=query, timeout=20) or []
+        except TelegramBusy as exc:
+            print("poll busy", exc.retry_after)
+            time.sleep(exc.retry_after)
+            continue
         except Exception:
-            time.sleep(3)
+            time.sleep(2)
             continue
         for update in updates:
             result = handle_update(update)
             update_id = update.get("update_id")
             if result == "retry":
+                wait = max(_flood_wait, 1)
+                _flood_wait = 0
+                print("retry in", wait)
+                time.sleep(wait)
                 break
             if isinstance(update_id, int):
                 offset = update_id + 1
