@@ -169,6 +169,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS seen_updates (
             update_id INTEGER PRIMARY KEY
         );
+        CREATE TABLE IF NOT EXISTS saved_files (
+            file_id TEXT PRIMARY KEY,
+            package_id INTEGER NOT NULL,
+            slot TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_packages_created ON packages(created_at);
         CREATE INDEX IF NOT EXISTS idx_packages_driver ON packages(telegram_user_id);
         """)
@@ -378,7 +383,10 @@ def _save_telegram_file(file_path, dest_path):
         raise
     finally:
         if conn is not None:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def fetch_file(file_id, dest_path):
@@ -428,7 +436,33 @@ def begin_loading(conn, user):
     }
 
 
-def attach_file(conn, package_id, slot, rel, name, mime):
+def saved_slot(file_id):
+    if not file_id:
+        return None
+    with _db_lock, db() as conn:
+        row = conn.execute(
+            "SELECT slot FROM saved_files WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()
+    return row["slot"] if row else None
+
+
+def recent_fill(uid, slot):
+    column = "loading_path" if slot == "loading" else "unloading_path"
+    cutoff = int(time.time()) - 15 * 60
+    with _db_lock, db() as conn:
+        row = conn.execute(
+            "SELECT id FROM packages WHERE telegram_user_id = ? AND "
+            + column
+            + " IS NOT NULL AND "
+            + column
+            + " != '' AND created_at >= ? ORDER BY id DESC LIMIT 1",
+            (int(uid), cutoff),
+        ).fetchone()
+    return bool(row)
+
+
+def attach_file(conn, package_id, slot, rel, name, mime, file_id):
     if slot == "loading":
         conn.execute(
             """
@@ -447,6 +481,11 @@ def attach_file(conn, package_id, slot, rel, name, mime):
             """,
             (rel, name, mime, package_id),
         )
+    if file_id:
+        conn.execute(
+            "INSERT OR REPLACE INTO saved_files (file_id, package_id, slot) VALUES (?, ?, ?)",
+            (file_id, package_id, slot),
+        )
 
 
 def state_matches(conn, uid, generation, expected):
@@ -457,6 +496,9 @@ def state_matches(conn, uid, generation, expected):
 
 
 def store_incoming(user, info, generation, slot, package_id):
+    existing = saved_slot(info.get("file_id"))
+    if existing:
+        return "ok", existing
     uid = int(user["id"])
     ext = ""
     tmp_dir = os.path.join(UPLOAD_DIR, "tmp")
@@ -466,10 +508,13 @@ def store_incoming(user, info, generation, slot, package_id):
         remote_path = fetch_file(info["file_id"], tmp_path)
     except TelegramFileTooBig:
         print("download too big")
-        return "too_big"
+        return "too_big", slot
     except Exception as exc:
         print("download failed", type(exc).__name__)
-        return "fail"
+        existing = saved_slot(info.get("file_id"))
+        if existing:
+            return "ok", existing
+        return "fail", slot
     ext = safe_ext(info.get("name"), remote_path)
     with _db_lock, db() as conn:
         if slot == "loading":
@@ -477,32 +522,32 @@ def store_incoming(user, info, generation, slot, package_id):
             if not ok:
                 conn.rollback()
                 os.remove(tmp_path)
-                return "stale"
+                return "stale", slot
             opened = begin_loading(conn, user)
             if not opened or opened["generation"] != generation:
                 conn.rollback()
                 os.remove(tmp_path)
-                return "stale"
+                return "stale", slot
             package_id = opened["id"]
         else:
             ok, current_package = state_matches(conn, uid, generation, "await_unloading")
             if not ok or current_package != package_id:
                 conn.rollback()
                 os.remove(tmp_path)
-                return "stale"
+                return "stale", slot
         folder = os.path.join(UPLOAD_DIR, str(package_id))
         os.makedirs(folder, exist_ok=True)
         filename = slot + ext
         dest = os.path.join(folder, filename)
         os.replace(tmp_path, dest)
         rel = "uploads/%s/%s" % (package_id, filename)
-        attach_file(conn, package_id, slot, rel, info.get("name") or filename, info.get("mime") or "")
+        attach_file(conn, package_id, slot, rel, info.get("name") or filename, info.get("mime") or "", info.get("file_id") or "")
         if slot == "loading":
             set_dialog(conn, uid, "await_unloading", package_id, generation)
         else:
             _state, _pid, gen = dialog_row(conn, uid)
             set_dialog(conn, uid, "idle", None, gen)
-    return "ok"
+    return "ok", slot
 
 
 def handle_message(message):
@@ -560,19 +605,32 @@ def _reply_soon(chat_id, text):
         time.sleep(0.5 + attempt)
 
 
+def _confirm_saved(chat_id, slot):
+    if slot == "loading":
+        _reply_soon(chat_id, GOT_LOAD + "\n" + PROMPT_UNLOAD)
+    else:
+        _reply_soon(chat_id, DONE)
+
+
 def _save_and_reply(user, chat_id, info, generation, slot, package_id):
     with _lock_for(int(user["id"])):
-        result = store_incoming(user, info, generation, slot, package_id)
-    if result == "too_big":
+        result, saved = store_incoming(user, info, generation, slot, package_id)
+    if result == "ok":
+        _confirm_saved(chat_id, saved)
+    elif result == "too_big":
         _reply_soon(chat_id, TOO_BIG)
-    elif result == "fail":
-        _reply_soon(chat_id, FILE_FAIL)
     elif result == "stale":
-        _reply_soon(chat_id, STALE)
-    elif result == "ok" and slot == "loading":
-        _reply_soon(chat_id, GOT_LOAD + "\n" + PROMPT_UNLOAD)
-    elif result == "ok":
-        _reply_soon(chat_id, DONE)
+        again = saved_slot(info.get("file_id")) or (slot if recent_fill(user["id"], slot) else None)
+        if again:
+            _confirm_saved(chat_id, again)
+        else:
+            _reply_soon(chat_id, STALE)
+    else:
+        again = saved_slot(info.get("file_id")) or (slot if recent_fill(user["id"], slot) else None)
+        if again:
+            _confirm_saved(chat_id, again)
+        else:
+            _reply_soon(chat_id, FILE_FAIL)
 
 
 def handle_update(update):
