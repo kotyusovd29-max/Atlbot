@@ -5,3 +5,6 @@ data.sqlite-*
 server.log
 __pycache__/
 *.pyc
+uploads/
+app.pid
+.ttn

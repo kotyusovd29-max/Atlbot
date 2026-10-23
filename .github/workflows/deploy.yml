@@ -11,9 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check SSH key secret
+      - name: Check secrets
         env:
           SSH_KEY: ${{ secrets.F5_SSH_KEY }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           set -e
           if [ -z "$SSH_KEY" ]; then
@@ -31,6 +32,57 @@ jobs:
             exit 1
           fi
           echo "Пароль ключа задан."
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "Секрет BOT_TOKEN пустой. Страница откроется, бот не запустится, пока секрет не добавят и деплой не повторят."
+          else
+            echo "BOT_TOKEN задан, длина ${#BOT_TOKEN}."
+          fi
+
+      - name: Wipe old project once
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: 89.169.3.47
+          username: kotusov
+          key: ${{ secrets.F5_SSH_KEY }}
+          passphrase: ${{ secrets.F5_SSH_PASSPHRASE }}
+          port: 22
+          timeout: 40s
+          command_timeout: 60s
+          script: |
+            set -e
+            if [ -f /home/kotusov/projects/pr1/.ttn ]; then
+              echo "TTN data exists, keep database and uploads"
+              exit 0
+            fi
+            python3 << 'PY'
+            import os, signal, time
+            me, parent = os.getpid(), os.getppid()
+
+            def stop(sig):
+                for name in os.listdir("/proc"):
+                    if not name.isdigit():
+                        continue
+                    pid = int(name)
+                    if pid in (me, parent):
+                        continue
+                    try:
+                        raw = open("/proc/%d/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode()
+                    except Exception:
+                        continue
+                    if "/home/kotusov/projects/pr1/app.py" in raw or ("http.server" in raw and "8000" in raw):
+                        try:
+                            os.kill(pid, sig)
+                            print("stopped", pid, sig)
+                        except Exception as exc:
+                            print("cannot stop", pid, exc)
+
+            stop(signal.SIGTERM)
+            time.sleep(1)
+            stop(signal.SIGKILL)
+            PY
+            mkdir -p /home/kotusov/projects/pr1
+            find /home/kotusov/projects/pr1 -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+            echo wiped
 
       - name: Copy files
         uses: appleboy/scp-action@v0.1.7
@@ -47,6 +99,8 @@ jobs:
 
       - name: Restart app
         uses: appleboy/ssh-action@v1.2.2
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         with:
           host: 89.169.3.47
           username: kotusov
@@ -55,6 +109,7 @@ jobs:
           port: 22
           timeout: 40s
           command_timeout: 120s
+          envs: BOT_TOKEN
           script: |
             set -e
             mkdir -p /home/kotusov/projects/pr1
