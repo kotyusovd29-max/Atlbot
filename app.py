@@ -221,11 +221,10 @@ def keyboard():
     return {
         "keyboard": [[{"text": BTN}]],
         "resize_keyboard": True,
-        "is_persistent": True,
     }
 
 
-def tg_call(method, payload=None, query=None):
+def tg_call(method, payload=None, query=None, timeout=30):
     token = (CONFIG.get("bot_token") or "").strip()
     if not token:
         raise RuntimeError("no token")
@@ -239,10 +238,16 @@ def tg_call(method, payload=None, query=None):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
     except urllib.error.HTTPError as exc:
-        print("telegram http", method, exc.code)
+        detail = ""
+        try:
+            parsed_error = json.loads(exc.read().decode("utf-8", "replace"))
+            detail = str(parsed_error.get("description") or "")[:200]
+        except Exception:
+            detail = ""
+        print("telegram http", method, exc.code, detail)
         raise
     except Exception as exc:
         print("telegram error", method, type(exc).__name__)
@@ -261,8 +266,10 @@ def reply(chat_id, text):
             "text": text,
             "reply_markup": keyboard(),
         })
+        return True
     except Exception:
         print("reply failed")
+        return False
 
 
 def fetch_file(file_id, dest_path):
@@ -409,7 +416,8 @@ def handle_message(message):
     if is_new_packet(text):
         with _db_lock, db() as conn:
             start_packet(conn, user)
-        reply(chat["id"], PROMPT_LOAD)
+        if not reply(chat["id"], PROMPT_LOAD):
+            return "retry"
         return "ok"
 
     with _db_lock, db() as conn:
@@ -417,11 +425,13 @@ def handle_message(message):
         state, package_id, generation = dialog_row(conn, int(user["id"]))
 
     if state == "idle":
-        reply(chat["id"], NEED_BUTTON)
+        if not reply(chat["id"], NEED_BUTTON):
+            return "retry"
         return "ok"
 
     if not incoming:
-        reply(chat["id"], NEED_FILE)
+        if not reply(chat["id"], NEED_FILE):
+            return "retry"
         return "ok"
 
     slot = "loading" if state == "await_loading" else "unloading"
@@ -430,12 +440,15 @@ def handle_message(message):
         reply(chat["id"], FILE_FAIL)
         return "retry"
     if result == "stale":
-        reply(chat["id"], STALE)
+        if not reply(chat["id"], STALE):
+            return "retry"
         return "ok"
     if slot == "loading":
-        reply(chat["id"], GOT_LOAD + "\n" + PROMPT_UNLOAD)
+        sent = reply(chat["id"], GOT_LOAD + "\n" + PROMPT_UNLOAD)
     else:
-        reply(chat["id"], DONE)
+        sent = reply(chat["id"], DONE)
+    if not sent:
+        return "retry"
     return "ok"
 
 
@@ -567,23 +580,34 @@ def resolve_stored_file(package_id, slot):
     return path, mime, name
 
 
-def setup_webhook():
+def poll_telegram():
     token = (CONFIG.get("bot_token") or "").strip()
     if not token:
-        print("bot token empty, webhook not set")
+        print("bot token empty, polling disabled")
         return
-    public = (CONFIG.get("public_url") or PUBLIC_URL).rstrip("/")
-    secret = CONFIG.get("webhook_secret") or ""
     try:
-        tg_call("setWebhook", {
-            "url": public + "/telegram/webhook",
-            "secret_token": secret,
-            "allowed_updates": ["message"],
-            "drop_pending_updates": False,
-        })
-        print("webhook ok")
+        tg_call("deleteWebhook", {"drop_pending_updates": False})
+        print("polling started")
     except Exception:
-        print("webhook failed")
+        print("deleteWebhook failed")
+        time.sleep(3)
+    offset = None
+    while True:
+        query = {"timeout": 25, "allowed_updates": json.dumps(["message"])}
+        if offset is not None:
+            query["offset"] = offset
+        try:
+            updates = tg_call("getUpdates", query=query, timeout=40) or []
+        except Exception:
+            time.sleep(3)
+            continue
+        for update in updates:
+            result = handle_update(update)
+            update_id = update.get("update_id")
+            if result == "retry":
+                break
+            if isinstance(update_id, int):
+                offset = update_id + 1
 
 
 def ensure_secret():
@@ -634,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, "text/html; charset=utf-8")
             return
         if path == "/api/health":
-            self._json(200, {"ok": True})
+            self._json(200, {"ok": True, "bot": bool((CONFIG.get("bot_token") or "").strip())})
             return
         if path == "/api/packages":
             self._packages(query)
@@ -726,7 +750,7 @@ def hmac_equal(left, right):
 def main():
     init_db()
     ensure_secret()
-    threading.Thread(target=setup_webhook, daemon=True).start()
+    threading.Thread(target=poll_telegram, daemon=True).start()
     server = ReuseServer(("0.0.0.0", PORT), Handler)
     print("listening", PORT)
     server.serve_forever()

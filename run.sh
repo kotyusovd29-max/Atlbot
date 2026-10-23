@@ -23,7 +23,9 @@ try:
                 cfg[key] = old[key]
 except FileNotFoundError:
     pass
-token = os.environ.get("BOT_TOKEN", "").strip()
+token = os.environ.get("BOT_TOKEN", "").strip().strip('"').strip("'")
+if "/bot" in token and ":" in token:
+    token = token.split("/bot", 1)[1].strip()
 if token:
     cfg["bot_token"] = token
     print("bot token updated, length", len(token))
