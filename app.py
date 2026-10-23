@@ -50,6 +50,8 @@ DEFAULT_CONFIG = {
 _db_lock = threading.Lock()
 _bot_lock = threading.Lock()
 _send_lock = threading.Lock()
+_user_locks = {}
+_user_locks_guard = threading.Lock()
 _last_send = 0.0
 _flood_wait = 0
 
@@ -324,9 +326,6 @@ def tg_call(method, payload=None, query=None, timeout=20):
 def reply(chat_id, text):
     global _last_send, _flood_wait
     with _send_lock:
-        wait = _last_send + 0.4 - time.time()
-        if wait > 0:
-            time.sleep(wait)
         try:
             tg_call("sendMessage", {
                 "chat_id": chat_id,
@@ -537,24 +536,43 @@ def handle_message(message):
         return "ok"
 
     slot = "loading" if state == "await_loading" else "unloading"
-    result = store_incoming(user, incoming, generation, slot, package_id)
-    if result == "too_big":
-        reply(chat["id"], TOO_BIG)
-        return "ok"
-    if result == "fail":
-        reply(chat["id"], FILE_FAIL)
-        return "ok"
-    if result == "stale":
-        if not reply(chat["id"], STALE):
-            return "retry"
-        return "ok"
-    if slot == "loading":
-        sent = reply(chat["id"], GOT_LOAD + "\n" + PROMPT_UNLOAD)
-    else:
-        sent = reply(chat["id"], DONE)
-    if not sent:
-        return "retry"
+    threading.Thread(
+        target=_save_and_reply,
+        args=(user, chat["id"], incoming, generation, slot, package_id),
+        daemon=True,
+    ).start()
     return "ok"
+
+
+def _lock_for(uid):
+    with _user_locks_guard:
+        lock = _user_locks.get(uid)
+        if lock is None:
+            lock = threading.Lock()
+            _user_locks[uid] = lock
+        return lock
+
+
+def _reply_soon(chat_id, text):
+    for attempt in range(3):
+        if reply(chat_id, text):
+            return
+        time.sleep(0.5 + attempt)
+
+
+def _save_and_reply(user, chat_id, info, generation, slot, package_id):
+    with _lock_for(int(user["id"])):
+        result = store_incoming(user, info, generation, slot, package_id)
+    if result == "too_big":
+        _reply_soon(chat_id, TOO_BIG)
+    elif result == "fail":
+        _reply_soon(chat_id, FILE_FAIL)
+    elif result == "stale":
+        _reply_soon(chat_id, STALE)
+    elif result == "ok" and slot == "loading":
+        _reply_soon(chat_id, GOT_LOAD + "\n" + PROMPT_UNLOAD)
+    elif result == "ok":
+        _reply_soon(chat_id, DONE)
 
 
 def handle_update(update):
@@ -704,7 +722,7 @@ def poll_telegram():
         time.sleep(3)
     offset = None
     while True:
-        query = {"timeout": 2, "allowed_updates": json.dumps(["message"])}
+        query = {"timeout": 1, "allowed_updates": json.dumps(["message"])}
         if offset is not None:
             query["offset"] = offset
         try:
