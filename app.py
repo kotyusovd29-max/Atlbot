@@ -76,7 +76,8 @@ class IPv4HTTPSConnection(http.client.HTTPSConnection):
             try:
                 sock.settimeout(self.timeout)
                 sock.connect(addr)
-                self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+                ctx = getattr(self, "_context", None) or _ssl_ctx
+                self.sock = ctx.wrap_socket(sock, server_hostname=self.host)
                 return
             except Exception as exc:
                 last = exc
@@ -353,7 +354,7 @@ def _save_telegram_file(file_path, dest_path):
     tmp = dest_path + ".part"
     conn = None
     try:
-        conn, resp = telegram_open("GET", path, timeout=25)
+        conn, resp = telegram_open("GET", path, timeout=12)
         if resp.status >= 400:
             raw = resp.read(800)
             _telegram_error("file", resp.status, raw)
@@ -383,7 +384,7 @@ def _save_telegram_file(file_path, dest_path):
 
 def fetch_file(file_id, dest_path):
     last = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             meta = tg_call("getFile", query={"file_id": file_id}, timeout=15)
             file_path = (meta or {}).get("file_path") or ""
@@ -684,6 +685,11 @@ def resolve_stored_file(package_id, slot):
     return path, mime, name
 
 
+def _is_text_update(update):
+    message = update.get("message") or {}
+    return bool(message.get("text")) and not extract_file(message)
+
+
 def poll_telegram():
     global _flood_wait
     token = (CONFIG.get("bot_token") or "").strip()
@@ -707,18 +713,30 @@ def poll_telegram():
             print("poll busy", exc.retry_after)
             time.sleep(exc.retry_after)
             continue
-        except Exception:
+        except Exception as exc:
+            print("poll error", type(exc).__name__)
             time.sleep(2)
             continue
+        answered = set()
         for update in updates:
+            if not _is_text_update(update):
+                continue
             result = handle_update(update)
             update_id = update.get("update_id")
             if result == "retry":
-                wait = max(_flood_wait, 1)
-                _flood_wait = 0
-                print("retry in", wait)
-                time.sleep(wait)
                 break
+            if isinstance(update_id, int):
+                answered.add(update_id)
+        for update in updates:
+            update_id = update.get("update_id")
+            if update_id not in answered:
+                result = handle_update(update)
+                if result == "retry":
+                    wait = max(_flood_wait, 1)
+                    _flood_wait = 0
+                    print("retry in", wait)
+                    time.sleep(wait)
+                    break
             if isinstance(update_id, int):
                 offset = update_id + 1
 
