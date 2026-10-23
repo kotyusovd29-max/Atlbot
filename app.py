@@ -447,21 +447,6 @@ def saved_slot(file_id):
     return row["slot"] if row else None
 
 
-def recent_fill(uid, slot):
-    column = "loading_path" if slot == "loading" else "unloading_path"
-    cutoff = int(time.time()) - 15 * 60
-    with _db_lock, db() as conn:
-        row = conn.execute(
-            "SELECT id FROM packages WHERE telegram_user_id = ? AND "
-            + column
-            + " IS NOT NULL AND "
-            + column
-            + " != '' AND created_at >= ? ORDER BY id DESC LIMIT 1",
-            (int(uid), cutoff),
-        ).fetchone()
-    return bool(row)
-
-
 def attach_file(conn, package_id, slot, rel, name, mime, file_id):
     if slot == "loading":
         conn.execute(
@@ -495,58 +480,60 @@ def state_matches(conn, uid, generation, expected):
     return True, package_id
 
 
-def store_incoming(user, info, generation, slot, package_id):
+def place_file(user, info, tmp_path, ext):
     existing = saved_slot(info.get("file_id"))
     if existing:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return "ok", existing
     uid = int(user["id"])
-    ext = ""
-    tmp_dir = os.path.join(UPLOAD_DIR, "tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, "%s-%s" % (uid, secrets.token_hex(8)))
-    try:
-        remote_path = fetch_file(info["file_id"], tmp_path)
-    except TelegramFileTooBig:
-        print("download too big")
-        return "too_big", slot
-    except Exception as exc:
-        print("download failed", type(exc).__name__)
-        existing = saved_slot(info.get("file_id"))
-        if existing:
-            return "ok", existing
-        return "fail", slot
-    ext = safe_ext(info.get("name"), remote_path)
     with _db_lock, db() as conn:
-        if slot == "loading":
-            ok, _current = state_matches(conn, uid, generation, "await_loading")
-            if not ok:
-                conn.rollback()
-                os.remove(tmp_path)
-                return "stale", slot
+        state, package_id, generation = dialog_row(conn, uid)
+        slot = None
+        if state == "await_loading":
             opened = begin_loading(conn, user)
-            if not opened or opened["generation"] != generation:
-                conn.rollback()
+            if opened:
+                package_id = opened["id"]
+                generation = opened["generation"]
+                slot = "loading"
+        elif state == "await_unloading" and package_id:
+            slot = "unloading"
+        if slot is None:
+            row = conn.execute(
+                """
+                SELECT id FROM packages
+                WHERE telegram_user_id = ?
+                  AND loading_path IS NOT NULL AND loading_path != ''
+                  AND (unloading_path IS NULL OR unloading_path = '')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (uid,),
+            ).fetchone()
+            if row:
+                package_id = row["id"]
+                slot = "unloading"
+        if slot is None:
+            try:
                 os.remove(tmp_path)
-                return "stale", slot
-            package_id = opened["id"]
-        else:
-            ok, current_package = state_matches(conn, uid, generation, "await_unloading")
-            if not ok or current_package != package_id:
-                conn.rollback()
-                os.remove(tmp_path)
-                return "stale", slot
+            except OSError:
+                pass
+            return "need_button", "loading"
         folder = os.path.join(UPLOAD_DIR, str(package_id))
         os.makedirs(folder, exist_ok=True)
         filename = slot + ext
         dest = os.path.join(folder, filename)
         os.replace(tmp_path, dest)
         rel = "uploads/%s/%s" % (package_id, filename)
-        attach_file(conn, package_id, slot, rel, info.get("name") or filename, info.get("mime") or "", info.get("file_id") or "")
+        attach_file(
+            conn, package_id, slot, rel,
+            info.get("name") or filename, info.get("mime") or "", info.get("file_id") or "",
+        )
         if slot == "loading":
             set_dialog(conn, uid, "await_unloading", package_id, generation)
         else:
-            _state, _pid, gen = dialog_row(conn, uid)
-            set_dialog(conn, uid, "idle", None, gen)
+            set_dialog(conn, uid, "idle", None, generation)
     return "ok", slot
 
 
@@ -568,22 +555,24 @@ def handle_message(message):
 
     with _db_lock, db() as conn:
         upsert_driver(conn, user)
-        state, package_id, generation = dialog_row(conn, int(user["id"]))
+        state, _package_id, _generation = dialog_row(conn, int(user["id"]))
+
+    if not incoming:
+        if state == "idle":
+            if not reply(chat["id"], NEED_BUTTON):
+                return "retry"
+        elif not reply(chat["id"], NEED_FILE):
+            return "retry"
+        return "ok"
 
     if state == "idle":
         if not reply(chat["id"], NEED_BUTTON):
             return "retry"
         return "ok"
 
-    if not incoming:
-        if not reply(chat["id"], NEED_FILE):
-            return "retry"
-        return "ok"
-
-    slot = "loading" if state == "await_loading" else "unloading"
     threading.Thread(
         target=_save_and_reply,
-        args=(user, chat["id"], incoming, generation, slot, package_id),
+        args=(user, chat["id"], incoming),
         daemon=True,
     ).start()
     return "ok"
@@ -612,25 +601,32 @@ def _confirm_saved(chat_id, slot):
         _reply_soon(chat_id, DONE)
 
 
-def _save_and_reply(user, chat_id, info, generation, slot, package_id):
-    with _lock_for(int(user["id"])):
-        result, saved = store_incoming(user, info, generation, slot, package_id)
-    if result == "ok":
-        _confirm_saved(chat_id, saved)
-    elif result == "too_big":
+def _save_and_reply(user, chat_id, info):
+    uid = int(user["id"])
+    tmp_dir = os.path.join(UPLOAD_DIR, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, "%s-%s" % (uid, secrets.token_hex(8)))
+    try:
+        remote_path = fetch_file(info["file_id"], tmp_path)
+    except TelegramFileTooBig:
+        print("download too big")
         _reply_soon(chat_id, TOO_BIG)
-    elif result == "stale":
-        again = saved_slot(info.get("file_id")) or (slot if recent_fill(user["id"], slot) else None)
-        if again:
-            _confirm_saved(chat_id, again)
-        else:
-            _reply_soon(chat_id, STALE)
-    else:
-        again = saved_slot(info.get("file_id")) or (slot if recent_fill(user["id"], slot) else None)
+        return
+    except Exception as exc:
+        print("download failed", type(exc).__name__)
+        again = saved_slot(info.get("file_id"))
         if again:
             _confirm_saved(chat_id, again)
         else:
             _reply_soon(chat_id, FILE_FAIL)
+        return
+    ext = safe_ext(info.get("name"), remote_path)
+    with _lock_for(uid):
+        result, slot = place_file(user, info, tmp_path, ext)
+    if result == "ok":
+        _confirm_saved(chat_id, slot)
+    else:
+        _reply_soon(chat_id, NEED_BUTTON)
 
 
 def handle_update(update):
