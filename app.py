@@ -28,16 +28,16 @@ PUBLIC_URL = "https://pr1.kotusov.f5-vibe.ru"
 TZ = timezone(timedelta(hours=3))
 MAX_BYTES = 25 * 1024 * 1024
 
-BTN = "Отправить новый пакет документов"
-PROMPT_LOAD = "Отправьте документ ТТН погрузки."
-PROMPT_UNLOAD = "Как будете готовы, отправьте отгрузочный ТТН."
+BTN = "Отправить пакет документов"
+BTN_OLD = "Отправить новый пакет документов"
+WELCOME = "Здравствуйте. Нажмите «Отправить пакет документов», чтобы прислать ТТН."
+PROMPT_LOAD = "Отправьте ТТН погрузки."
+PROMPT_UNLOAD = "Документ загружен. Как будете готовы, отправьте ТТН отгрузки."
 NEED_FILE = "Пришлите фото или файл документа."
-NEED_BUTTON = "Нажмите «Отправить новый пакет документов»."
-DONE = "Пакет документов получен: ТТН погрузки и ТТН отгрузки."
-GOT_LOAD = "ТТН погрузки получена."
+NEED_BUTTON = "Нажмите «Отправить пакет документов»."
+DONE = "Файлы отправлены."
 FILE_FAIL = "Не удалось получить файл. Пришлите его ещё раз."
 TOO_BIG = "Файл больше 20 МБ, Telegram его не отдаёт. Пришлите фото или файл меньшего размера."
-STALE = "Этот файл уже не относится к текущему шагу. Нажмите кнопку и отправьте документ ещё раз."
 
 PREVIEW_MIME = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
@@ -50,8 +50,6 @@ DEFAULT_CONFIG = {
 _db_lock = threading.Lock()
 _bot_lock = threading.Lock()
 _send_lock = threading.Lock()
-_user_locks = {}
-_user_locks_guard = threading.Lock()
 _last_send = 0.0
 _flood_wait = 0
 
@@ -237,11 +235,26 @@ def set_dialog(conn, uid, state, package_id, generation):
     )
 
 
+def normalized_text(text):
+    return " ".join((text or "").split())
+
+
+def is_start(text):
+    head = normalized_text(text).split(" ", 1)[0]
+    return head == "/start" or head.startswith("/start@")
+
+
 def is_new_packet(text):
-    value = " ".join((text or "").split())
-    if value == BTN or "новый пакет" in value.casefold():
+    value = normalized_text(text)
+    if value in (BTN, BTN_OLD) or value.casefold() in (BTN.casefold(), BTN_OLD.casefold()):
         return True
-    return value == "/new" or value.startswith("/start")
+    return value == "/new" or "новый пакет" in value.casefold()
+
+
+def confirm_text(slot):
+    if slot == "loading":
+        return PROMPT_UNLOAD
+    return DONE
 
 
 def extract_file(message):
@@ -408,6 +421,13 @@ def fetch_file(file_id, dest_path):
     raise last or RuntimeError("download")
 
 
+def show_welcome(conn, user):
+    uid, _name, _username = upsert_driver(conn, user)
+    _state, _package_id, generation = dialog_row(conn, uid)
+    set_dialog(conn, uid, "idle", None, generation + 1)
+    return uid
+
+
 def start_packet(conn, user):
     uid, _name, _username = upsert_driver(conn, user)
     _state, _package_id, generation = dialog_row(conn, uid)
@@ -499,20 +519,14 @@ def place_file(user, info, tmp_path, ext):
                 generation = opened["generation"]
                 slot = "loading"
         elif state == "await_unloading" and package_id:
-            slot = "unloading"
-        if slot is None:
-            row = conn.execute(
+            owned = conn.execute(
                 """
-                SELECT id FROM packages
-                WHERE telegram_user_id = ?
-                  AND loading_path IS NOT NULL AND loading_path != ''
-                  AND (unloading_path IS NULL OR unloading_path = '')
-                ORDER BY id DESC LIMIT 1
+                SELECT loading_path FROM packages
+                WHERE id = ? AND telegram_user_id = ?
                 """,
-                (uid,),
+                (package_id, uid),
             ).fetchone()
-            if row:
-                package_id = row["id"]
+            if owned and owned["loading_path"]:
                 slot = "unloading"
         if slot is None:
             try:
@@ -537,71 +551,13 @@ def place_file(user, info, tmp_path, ext):
     return "ok", slot
 
 
-def handle_message(message):
-    user = message.get("from") or {}
-    chat = message.get("chat") or {}
-    if "id" not in user or "id" not in chat:
+def say(chat_id, text):
+    if reply(chat_id, text):
         return "ok"
-    text = message.get("text") or ""
-    incoming = extract_file(message)
-    print("in", chat.get("id"), "text" if text else ("file" if incoming else "other"))
-
-    if is_new_packet(text):
-        with _db_lock, db() as conn:
-            start_packet(conn, user)
-        if not reply(chat["id"], PROMPT_LOAD):
-            return "retry"
-        return "ok"
-
-    with _db_lock, db() as conn:
-        upsert_driver(conn, user)
-        state, _package_id, _generation = dialog_row(conn, int(user["id"]))
-
-    if not incoming:
-        if state == "idle":
-            if not reply(chat["id"], NEED_BUTTON):
-                return "retry"
-        elif not reply(chat["id"], NEED_FILE):
-            return "retry"
-        return "ok"
-
-    if state == "idle":
-        if not reply(chat["id"], NEED_BUTTON):
-            return "retry"
-        return "ok"
-
-    threading.Thread(
-        target=_save_and_reply,
-        args=(user, chat["id"], incoming),
-        daemon=True,
-    ).start()
-    return "ok"
+    return "retry"
 
 
-def _lock_for(uid):
-    with _user_locks_guard:
-        lock = _user_locks.get(uid)
-        if lock is None:
-            lock = threading.Lock()
-            _user_locks[uid] = lock
-        return lock
-
-
-def _reply_soon(chat_id, text):
-    for attempt in range(3):
-        if reply(chat_id, text):
-            return
-        time.sleep(0.5 + attempt)
-
-
-def _confirm_saved(chat_id, slot):
-    if slot == "loading":
-        _reply_soon(chat_id, GOT_LOAD + "\n" + PROMPT_UNLOAD)
-    else:
-        _reply_soon(chat_id, DONE)
-
-
-def _save_and_reply(user, chat_id, info):
+def take_file(user, info):
     uid = int(user["id"])
     tmp_dir = os.path.join(UPLOAD_DIR, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -610,23 +566,60 @@ def _save_and_reply(user, chat_id, info):
         remote_path = fetch_file(info["file_id"], tmp_path)
     except TelegramFileTooBig:
         print("download too big")
-        _reply_soon(chat_id, TOO_BIG)
-        return
+        return "too_big", None
     except Exception as exc:
         print("download failed", type(exc).__name__)
         again = saved_slot(info.get("file_id"))
         if again:
-            _confirm_saved(chat_id, again)
-        else:
-            _reply_soon(chat_id, FILE_FAIL)
-        return
+            return "ok", again
+        return "fail", None
     ext = safe_ext(info.get("name"), remote_path)
-    with _lock_for(uid):
-        result, slot = place_file(user, info, tmp_path, ext)
-    if result == "ok":
-        _confirm_saved(chat_id, slot)
-    else:
-        _reply_soon(chat_id, NEED_BUTTON)
+    return place_file(user, info, tmp_path, ext)
+
+
+def handle_message(message):
+    user = message.get("from") or {}
+    chat = message.get("chat") or {}
+    if "id" not in user or "id" not in chat:
+        return "ok"
+    text = message.get("text") or ""
+    incoming = extract_file(message)
+    print("in", chat.get("id"), "text" if text else ("file" if incoming else "other"))
+    chat_id = chat["id"]
+
+    if incoming:
+        existing = saved_slot(incoming.get("file_id"))
+        if existing:
+            return say(chat_id, confirm_text(existing))
+
+    if is_start(text) and not incoming:
+        with _db_lock, db() as conn:
+            show_welcome(conn, user)
+        return say(chat_id, WELCOME)
+
+    if is_new_packet(text) and not incoming:
+        with _db_lock, db() as conn:
+            start_packet(conn, user)
+        return say(chat_id, PROMPT_LOAD)
+
+    with _db_lock, db() as conn:
+        upsert_driver(conn, user)
+        state, _package_id, _generation = dialog_row(conn, int(user["id"]))
+
+    if not incoming:
+        return say(chat_id, NEED_BUTTON if state == "idle" else NEED_FILE)
+
+    if state == "idle":
+        return say(chat_id, NEED_BUTTON)
+
+    result, slot = take_file(user, incoming)
+    if result == "too_big":
+        return say(chat_id, TOO_BIG)
+    if result == "fail":
+        return say(chat_id, FILE_FAIL)
+    if result != "ok":
+        return say(chat_id, NEED_BUTTON)
+    return say(chat_id, confirm_text(slot))
 
 
 def handle_update(update):
